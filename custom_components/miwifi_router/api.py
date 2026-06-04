@@ -529,6 +529,7 @@ class MiWiFiAPIClient:
             device = {
                 "mac": d.get("mac", "").upper(),
                 "name": d.get("devname", d.get("mac", "")),
+                "hostname": d.get("hostname", ""),
                 "online": int(d.get("online", 0)),
                 "upspeed": int(d.get("upspeed", 0)),
                 "downspeed": int(d.get("downspeed", 0)),
@@ -606,6 +607,7 @@ class MiWiFiAPIClient:
                     "devname",
                     d.get("name", d.get("hostname", d.get("mac", ""))),
                 ),
+                "hostname": d.get("hostname", ""),
                 "online": int(d.get("online", 0)) if d.get("online") else 0,
                 "upspeed": int(d.get("upspeed", 0)) if d.get("upspeed") else 0,
                 "downspeed": int(d.get("downspeed", 0)) if d.get("downspeed") else 0,

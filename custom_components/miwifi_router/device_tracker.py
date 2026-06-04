@@ -7,6 +7,11 @@ Uses TrackerEntity with overridden state property to return "home"/"not_home"
 based on the router's is_connected status. TrackerEntity's default state
 property only looks at GPS coordinates and ignores is_connected, which would
 cause the state to show "unknown". We override it to fix this.
+
+Naming: _attr_has_entity_name = False because each device_tracker represents
+an independent network device, NOT a sub-feature of the router. The entity
+name should be the device's own name (from router API devname) without
+the router model prefix.
 """
 
 from __future__ import annotations
@@ -117,7 +122,7 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
     "home" / "not_home" based on is_connected.
     """
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -138,11 +143,14 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         # Unique ID based on router host + device MAC
         self._attr_unique_id = f"{coordinator.api._host}_device_{mac}"
 
-        # Friendly name - prefer hostname from device_list, then devname
+        # Friendly name - use the device's own name from the router API.
+        # Priority: name (from devname) > hostname > MAC fallback
+        # With _attr_has_entity_name = False, this becomes the full display
+        # name without the router model prefix.
         name = dev_data.get("name", "")
-        if not name or name == mac:
-            name = dev_data.get("hostname", dev_data.get("name", ""))
-        if not name or name == mac:
+        if not name or name.upper() == mac.upper():
+            name = dev_data.get("hostname", "")
+        if not name or name.upper() == mac.upper():
             name = f"Device {mac}"
         self._attr_name = name
 
@@ -185,10 +193,11 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         self._update_connection_state(dev_data)
 
         # Update name if we got a more descriptive one
+        # Priority: name (from devname) > hostname — same as __init__
         name = dev_data.get("name", "")
         hostname = dev_data.get("hostname", "")
-        preferred_name = hostname if hostname and hostname != self._mac else name
-        if preferred_name and preferred_name != self._mac and preferred_name.strip():
+        preferred_name = name if name and name.upper() != self._mac.upper() else hostname
+        if preferred_name and preferred_name.upper() != self._mac.upper() and preferred_name.strip():
             self._attr_name = preferred_name
 
     def set_dev_data(self, dev_data: dict[str, Any]) -> None:
