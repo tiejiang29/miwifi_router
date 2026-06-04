@@ -1,7 +1,7 @@
 # MiWiFi Router - Home Assistant Custom Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/v/release/AlexxIT/miwifi_router)](https://github.com/AlexxIT/miwifi_router)
+[![GitHub Release](https://img.shields.io/github/v/release/tiejiang29/miwifi_router)](https://github.com/tiejiang29/miwifi_router)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2023.1%2B-blue)](https://www.home-assistant.io/)
 
 小米 MiWiFi 路由器 Home Assistant 自定义集成，通过路由器本地 Web API 获取实时数据，无需云端。
@@ -63,7 +63,7 @@
 
 1. 在 HACS 中添加自定义仓库：
    - 打开 HACS → 集成 → 右上角菜单 → 自定义仓库
-   - 仓库 URL：`https://github.com/AlexxIT/miwifi_router`
+   - 仓库 URL：`https://github.com/tiejiang29/miwifi_router`
    - 类别：集成
 2. 搜索 "MiWiFi Router" 并点击安装
 3. 重启 Home Assistant
