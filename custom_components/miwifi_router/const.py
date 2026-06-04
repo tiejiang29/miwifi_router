@@ -15,11 +15,11 @@ DEFAULT_DEVICE_SCAN_INTERVAL = 30  # seconds - for device list details
 # Router API endpoints
 API_LOGIN = "/cgi-bin/luci/api/xqsystem/login"
 API_STATUS = "/api/misystem/status"
-API_DEVICE_LIST = "/api/xqsystem/device_list"
-API_INIT_INFO = "/api/xqsystem/init_info"
+API_DEVICE_LIST = "/api/misystem/device_list"
+API_INIT_INFO = "/api/misystem/init_info"
 API_NEWSTATUS = "/api/misystem/newstatus"
-API_WIFI_DETAIL = "/api/xqnetwork/wifi_detail_all"
-API_SYSTEM_STATUS = "/api/xqsystem/status"
+API_WIFI_DETAIL = "/api/misystem/wifi_detail_all"
+API_SYSTEM_STATUS = "/api/misystem/status"
 
 # Stok cache duration (seconds)
 STOK_CACHE_SECONDS = 600  # 10 minutes

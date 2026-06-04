@@ -107,10 +107,10 @@ class MiWiFiAPIClient:
         Failure is non-fatal - we fall back to a dummy MAC.
         """
         session = self._get_session()
-        # Try multiple possible paths for init_info
+        # Try multiple possible paths for init_info (different firmware versions)
         paths = [
+            "/api/misystem/init_info",
             "/api/xqsystem/init_info",
-            "/cgi-bin/luci/api/xqsystem/init_info",
         ]
         for path in paths:
             url = f"{self._base_url}{path}"
