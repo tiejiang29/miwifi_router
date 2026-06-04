@@ -3,10 +3,10 @@
 Provides device online/offline detection and per-device speed monitoring.
 Each connected device appears as a device_tracker entity with speed attributes.
 
-Uses ScannerEntity (not TrackerEntity) because this is a router/network scanner.
-TrackerEntity is for GPS-based trackers and ignores is_connected, causing
-the state to show "unknown". ScannerEntity uses is_connected to determine
-"home" / "not_home" state.
+Uses TrackerEntity with overridden state property to return "home"/"not_home"
+based on the router's is_connected status. TrackerEntity's default state
+property only looks at GPS coordinates and ignores is_connected, which would
+cause the state to show "unknown". We override it to fix this.
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import (
-    ScannerEntity,
     SourceType,
+    TrackerEntity,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import STATE_HOME, STATE_NOT_HOME
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -107,20 +108,16 @@ class MiWiFiTrackerManager:
                 tracker.set_dev_data({**tracker._dev_data, "online": 0})
 
 
-class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], ScannerEntity):
+class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
     """Representation of a network device tracked by MiWiFi Router.
 
-    Uses ScannerEntity (not TrackerEntity) because:
-    - TrackerEntity is for GPS trackers, ignores is_connected → state = "unknown"
-    - ScannerEntity uses is_connected → state = "home" / "not_home"
-
-    Each device shows:
-    - State: home / not_home (based on router's 'online' field)
-    - Attributes: per-device upload/download speed, totals, signal, etc.
+    Uses TrackerEntity with overridden state property.
+    TrackerEntity's default state() only checks GPS coordinates and returns None
+    when there are none, causing "unknown" state. We override state to return
+    "home" / "not_home" based on is_connected.
     """
 
     _attr_has_entity_name = True
-    _attr_source_type = SourceType.ROUTER
 
     def __init__(
         self,
@@ -136,6 +133,7 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], ScannerEntity):
         self._dev_data = dev_data
         self._model = model
         self._firmware = firmware
+        self._is_connected: bool = False
 
         # Unique ID based on router host + device MAC
         self._attr_unique_id = f"{coordinator.api._host}_device_{mac}"
@@ -149,8 +147,29 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], ScannerEntity):
         self._attr_name = name
 
         # Initial connection state
+        self._update_connection_state(dev_data)
+
+    def _update_connection_state(self, dev_data: dict[str, Any]) -> None:
+        """Update the connection state from device data."""
         online_val = dev_data.get("online", 0)
-        self._attr_is_connected = int(online_val) > 0 if online_val else False
+        self._is_connected = int(online_val) > 0 if online_val else False
+
+    @property
+    def state(self) -> str:
+        """Return the state of the device.
+
+        Override TrackerEntity's default state property which only checks
+        GPS coordinates (returns None for non-GPS trackers → "unknown").
+        We use is_connected instead to return "home" / "not_home".
+        """
+        if self._is_connected:
+            return STATE_HOME
+        return STATE_NOT_HOME
+
+    @property
+    def source_type(self) -> SourceType:
+        """Return the source type of the device tracker."""
+        return SourceType.ROUTER
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -163,8 +182,7 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], ScannerEntity):
     def _update_from_data(self, dev_data: dict[str, Any]) -> None:
         """Update internal state from device data dict."""
         self._dev_data = dev_data
-        online_val = dev_data.get("online", 0)
-        self._attr_is_connected = int(online_val) > 0 if online_val else False
+        self._update_connection_state(dev_data)
 
         # Update name if we got a more descriptive one
         name = dev_data.get("name", "")
@@ -200,13 +218,6 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], ScannerEntity):
     def mac_address(self) -> str:
         """Return the MAC address of the device."""
         return self._mac
-
-    @property
-    def hostname(self) -> str | None:
-        """Return the hostname of the device."""
-        name = self._dev_data.get("name", "")
-        hostname = self._dev_data.get("hostname", "")
-        return hostname or name or None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
