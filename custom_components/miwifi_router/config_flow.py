@@ -53,7 +53,7 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Check if already configured
             await self.async_set_unique_id(host)
-            self._abort_if_already_configured()
+            self._abort_if_unique_id_configured()
 
             # Test connection
             api = MiWiFiAPIClient(host, password)
