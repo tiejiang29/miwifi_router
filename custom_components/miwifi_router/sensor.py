@@ -153,6 +153,11 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self._attr_extra_state_attributes: dict[str, Any] = {}
 
     @property
+    def available(self) -> bool:
+        """Return True if the router is connected."""
+        return self.coordinator.router_data.connected
+
+    @property
     def device_info(self) -> dict[str, Any]:
         """Return device info for the router."""
         return {

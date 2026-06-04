@@ -4,10 +4,22 @@ Polling tiers:
 - Tier 1 (realtime): WAN speeds, device counts, per-device speeds — 10s
 - Tier 2 (devices): Full device list with details — 30s
 - Tier 3 (static): Hardware/firmware info — 5 min (cached in API client)
+
+Re-authorization strategy (inspired by hass-miwifi):
+- _is_reauthorization flag: when any API call fails with auth error,
+  set this flag so the next poll cycle will re-login first before
+  fetching any data.
+- _is_first_update flag: on the very first update, if it fails,
+  retry with exponential backoff (up to MAX_RETRIES times) before
+  giving up. This handles transient issues during startup.
+- Grace period: when a non-first update gets an auth error, we keep
+  entities "available" for one more cycle. Only if re-auth also fails
+  do entities become unavailable. This prevents entity flickering.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import timedelta
@@ -24,6 +36,8 @@ from .const import DEFAULT_DEVICE_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+MAX_FIRST_UPDATE_RETRIES = 5
+
 
 class MiWiFiRouterData:
     """Container for all router data, separated by polling tier."""
@@ -39,6 +53,8 @@ class MiWiFiRouterData:
         self.devices: dict[str, dict[str, Any]] = {}
         # Previous online count for change detection
         self._prev_online_count: int = -1
+        # Whether the router is currently reachable/authenticated
+        self.connected: bool = False
 
     def get_online_count(self) -> int:
         """Get current online device count."""
@@ -93,7 +109,13 @@ class MiWiFiRouterData:
 
 
 class MiWiFiCoordinator(DataUpdateCoordinator):
-    """Coordinator with layered polling: different intervals for different data tiers."""
+    """Coordinator with layered polling and re-authorization support.
+
+    Inspired by hass-miwifi's LuciUpdater pattern:
+    - _is_reauthorization: set True when auth fails, triggers re-login next cycle
+    - _is_first_update: enables retry with backoff on first update
+    - Grace period: entities stay available during first auth failure
+    """
 
     def __init__(
         self,
@@ -115,6 +137,10 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
         # Track device list poll timing
         self._last_device_poll: float = 0
         self._last_init_poll: float = 0
+        # Re-authorization flag — starts True so first update will login
+        self._is_reauthorization: bool = True
+        # First update flag — enables retry with backoff
+        self._is_first_update: bool = True
         # Auth failure counter for graceful degradation
         self._auth_failures: int = 0
 
@@ -129,15 +155,39 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
         return self._data
 
     async def _async_update_data(self) -> MiWiFiRouterData:
-        """Fetch data from the router using layered polling strategy."""
+        """Fetch data from the router using layered polling strategy.
+
+        Re-authorization flow:
+        1. If _is_reauthorization is True, login first before fetching data
+        2. If data fetch fails with auth error, set _is_reauthorization = True
+           for the next cycle
+        3. On first update, retry with exponential backoff on failure
+        4. Grace period: on non-first update, keep entities available for
+           one cycle even if auth fails
+        """
+        return await self._update_with_retry()
+
+    async def _update_with_retry(self, retry: int = 0) -> MiWiFiRouterData:
+        """Internal update method with retry support for first update."""
         now = time.time()
+        _was_reauthorization = self._is_reauthorization
 
         try:
+            # ---- Login if needed ----
+            # If re-authorization is flagged, ensure we have a fresh stok
+            if self._is_reauthorization:
+                _LOGGER.debug(
+                    "Re-authorization flagged, ensuring fresh stok for %s",
+                    self._api._host,
+                )
+                # Force re-login by invalidating current stok
+                self._api.invalidate_stok()
+                # The next _api_get() call will trigger a fresh login
+
             # ---- Tier 1: Always poll realtime data ----
             self._data.status = await self._api.get_status()
 
             # ---- Tier 2: Poll device list at lower frequency ----
-            # OR immediately if online count changed (smart trigger)
             count_changed = self._data.has_online_count_changed()
             device_poll_due = (
                 now - self._last_device_poll
@@ -156,7 +206,6 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
                     # Don't fail the entire update - status data is still valid
 
             # ---- Tier 3: Poll init info at very low frequency ----
-            # API client caches this for 5 minutes internally
             if (now - self._last_init_poll) >= 300:
                 try:
                     self._data.init_info = await self._api.get_init_info()
@@ -167,23 +216,87 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
             # ---- Merge device data ----
             self._data.get_merged_devices()
 
-            # Reset auth failure counter on success
+            # Success! Clear flags
+            self._is_reauthorization = False
+            self._data.connected = True
             self._auth_failures = 0
+
+            if self._is_first_update:
+                _LOGGER.info(
+                    "First update successful for %s",
+                    self._api._host,
+                )
+                self._is_first_update = False
 
             return self._data
 
         except MiWiFiAuthError as err:
             self._auth_failures += 1
+            # Mark for re-authorization on next cycle
+            self._is_reauthorization = True
+
+            # Grace period: on non-first update, if we weren't already
+            # in re-authorization before this cycle, keep entities available
+            # for one more cycle. This prevents entity flickering.
+            if not self._is_first_update and not _was_reauthorization:
+                _LOGGER.warning(
+                    "Auth error during poll for %s (grace period, keeping data): %s",
+                    self._api._host, err,
+                )
+                self._data.connected = True  # Keep available during grace period
+                return self._data
+
+            # First update: retry with exponential backoff
+            if self._is_first_update and retry < MAX_FIRST_UPDATE_RETRIES:
+                backoff = (retry + 1) * 2  # 2s, 4s, 6s, 8s, 10s
+                _LOGGER.warning(
+                    "First update auth error for %s (retry %d/%d in %ds): %s",
+                    self._api._host,
+                    retry + 1, MAX_FIRST_UPDATE_RETRIES, backoff, err,
+                )
+                await asyncio.sleep(backoff)
+                return await self._update_with_retry(retry + 1)
+
+            # Exhausted retries or repeated auth failure
             if self._auth_failures >= 3:
                 _LOGGER.error(
-                    "Authentication failed %d times in a row. "
+                    "Authentication failed %d times in a row for %s. "
                     "Please check your password and reconfigure the integration.",
-                    self._auth_failures,
+                    self._auth_failures, self._api._host,
                 )
+            self._data.connected = False
             raise UpdateFailed(f"Authentication error: {err}") from err
 
         except MiWiFiConnectionError as err:
+            # Connection errors don't trigger re-authorization
+            self._is_reauthorization = False
+            self._data.connected = False
+
+            # First update: retry with exponential backoff
+            if self._is_first_update and retry < MAX_FIRST_UPDATE_RETRIES:
+                backoff = (retry + 1) * 2
+                _LOGGER.warning(
+                    "First update connection error for %s (retry %d/%d in %ds): %s",
+                    self._api._host,
+                    retry + 1, MAX_FIRST_UPDATE_RETRIES, backoff, err,
+                )
+                await asyncio.sleep(backoff)
+                return await self._update_with_retry(retry + 1)
+
             raise UpdateFailed(f"Connection error: {err}") from err
 
         except Exception as err:
+            self._data.connected = False
+
+            # First update: retry with exponential backoff
+            if self._is_first_update and retry < MAX_FIRST_UPDATE_RETRIES:
+                backoff = (retry + 1) * 2
+                _LOGGER.warning(
+                    "First update unexpected error for %s (retry %d/%d in %ds): %s",
+                    self._api._host,
+                    retry + 1, MAX_FIRST_UPDATE_RETRIES, backoff, err,
+                )
+                await asyncio.sleep(backoff)
+                return await self._update_with_retry(retry + 1)
+
             raise UpdateFailed(f"Unexpected error: {err}") from err

@@ -1,15 +1,15 @@
-"""MiWiFi Router API Client with aiohttp and stok session management.
+"""MiWiFi Router API Client with stok session management.
 
-Key design decisions:
+Key design decisions (inspired by dmamontov/hass-miwifi patterns):
 - Stok (session token) is kept alive as long as the router accepts it.
   We do NOT expire the stok locally — the router maintains server-side session
   state and will return 401 when the session truly expires. Only then do we
-  re-login. This avoids unnecessary login requests and the "not auth" problem
-  caused by stale session conflicts.
+  re-login.
 - Login uses a FRESH aiohttp session to avoid stale cookie interference.
-- Before each login POST, we GET the router's root page to clear stale
-  server-side sessions.
-- All authenticated API calls use HA's shared aiohttp session with stok in URL.
+- Before the FIRST login, we call logout() to clear any stale server-side
+  session from a previous run (e.g., from config_flow or HA restart).
+- On "not auth" errors during login, we retry with backoff instead of
+  immediately raising an error — this handles transient session conflicts.
 - BE5000 (RD18) uses SHA256+SHA256 for password hashing.
 """
 
@@ -30,16 +30,18 @@ from .const import (
     API_DEVICE_LIST,
     API_INIT_INFO,
     API_LOGIN,
+    API_LOGOUT,
     API_NEWSTATUS,
     API_STATUS,
     API_SYSTEM_STATUS,
-    API_WIFI_DETAIL,
     PUBLIC_KEY,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
+DEFAULT_CALL_DELAY = 1  # seconds to wait after logout before re-login
+MAX_LOGIN_RETRIES = 3
 
 
 class MiWiFiAuthError(Exception):
@@ -66,6 +68,9 @@ class MiWiFiAPIClient:
         self._hass = hass
         # Stok is kept indefinitely until router rejects it
         self._stok: str | None = None
+        # Track whether this is the first login attempt
+        self._is_first_login: bool = True
+        # Router hardware info
         self._init_info_cache: dict[str, Any] | None = None
         self._init_info_expire: float = 0
         self._mac: str | None = None
@@ -79,7 +84,12 @@ class MiWiFiAPIClient:
         raise RuntimeError("Home Assistant instance not provided")
 
     async def close(self) -> None:
-        """Nothing to close - HA manages the shared session."""
+        """Clean up - logout if we have an active session."""
+        if self._stok:
+            try:
+                await self.logout()
+            except Exception as err:
+                _LOGGER.debug("Logout during close failed (non-fatal): %s", err)
 
     # ---- Authentication ----
 
@@ -125,24 +135,66 @@ class MiWiFiAPIClient:
         await self._login()
         return self._stok  # type: ignore[return-value]
 
+    async def logout(self) -> None:
+        """Logout from the router to clear the server-side session.
+
+        This is important before the first login to avoid "not auth" conflicts
+        caused by stale sessions from previous runs or config_flow testing.
+        """
+        if not self._stok:
+            _LOGGER.debug("No stok to logout with for %s", self._host)
+            return
+
+        logout_url = (
+            f"{self._base_url}/cgi-bin/luci/;stok={self._stok}{API_LOGOUT}"
+        )
+        try:
+            # Use a fresh session for logout to avoid cookie interference
+            async with aiohttp.ClientSession(
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
+            ) as session:
+                async with session.get(
+                    logout_url,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                    allow_redirects=False,
+                ) as resp:
+                    _LOGGER.debug(
+                        "Logout from %s: status=%s", self._host, resp.status,
+                    )
+        except Exception as err:
+            _LOGGER.debug("Logout request failed (non-fatal): %s", err)
+
+        self._stok = None
+        _LOGGER.debug("Stok cleared for %s after logout", self._host)
+
     async def _login(self) -> None:
         """Authenticate with the router and cache the stok.
 
-        Login flow:
-        1. Create a fresh aiohttp session (no stale cookies)
-        2. GET the router's root page first - this triggers the router to
-           clear any stale server-side session associated with our IP.
-        3. POST the login data with SHA256+SHA256 hashed password
-        4. If "not auth" (session conflict), wait 2s and retry once
-        5. Extract stok from response
+        Login flow (inspired by hass-miwifi):
+        1. On FIRST login ever, call logout() to clear any stale session
+           from a previous run (config_flow, HA restart, etc.), then wait 1s.
+        2. Create a fresh aiohttp session (no stale cookies)
+        3. GET the router's root page first — triggers router to clear
+           any stale server-side session associated with our IP.
+        4. POST the login data with SHA256+SHA256 hashed password
+        5. If "not auth" (session conflict), retry with exponential backoff
+        6. Extract stok from response
 
         The stok is kept indefinitely (no local expiry). The router
         maintains the session server-side. When the router eventually
         invalidates it, we'll get a 401 and re-login then.
         """
-        max_attempts = 2  # 1 normal + 1 retry for session conflict
+        # On first login, clear any stale session from previous runs
+        if self._is_first_login:
+            _LOGGER.debug("First login for %s, clearing stale session", self._host)
+            try:
+                await self.logout()
+            except Exception as err:
+                _LOGGER.debug("Pre-login logout failed (non-fatal): %s", err)
+            await asyncio.sleep(DEFAULT_CALL_DELAY)
+            self._is_first_login = False
 
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(1, MAX_LOGIN_RETRIES + 1):
             data = await self._do_login_request(attempt)
 
             if data.get("code") == 0:
@@ -150,19 +202,6 @@ class MiWiFiAPIClient:
 
             error_msg = data.get("msg", "Unknown error")
             error_code = data.get("code")
-
-            # "not auth" with code 401 usually means session conflict
-            # (another login is still active). Retry after a short wait.
-            if (
-                "not auth" in str(error_msg) or error_code == 401
-            ) and attempt < max_attempts:
-                _LOGGER.warning(
-                    "Login attempt %d got 'not auth' (session conflict), "
-                    "waiting 2s before retry for %s",
-                    attempt, self._host,
-                )
-                await asyncio.sleep(2)
-                continue
 
             # "密码错误" is a real wrong password - don't retry
             if "密码错误" in str(error_msg):
@@ -172,13 +211,31 @@ class MiWiFiAPIClient:
                 )
                 raise MiWiFiAuthError(f"Invalid password: {error_msg}")
 
-            # Other error - don't retry
-            _LOGGER.error(
-                "Login failed for %s: code=%s, msg=%s",
-                self._host, error_code, error_msg,
-            )
+            # "not auth" with code 401 usually means session conflict
+            # (another login is still active). Retry with backoff.
+            if attempt < MAX_LOGIN_RETRIES:
+                backoff = attempt * 2  # 2s, 4s
+                _LOGGER.debug(
+                    "Login attempt %d/%d got code=%s msg='%s' for %s, "
+                    "retrying in %ds",
+                    attempt, MAX_LOGIN_RETRIES, error_code, error_msg,
+                    self._host, backoff,
+                )
+                await asyncio.sleep(backoff)
+                continue
+
+            # All retries exhausted
             if error_code == 401:
-                raise MiWiFiAuthError(f"Invalid password: {error_msg}")
+                _LOGGER.error(
+                    "Login failed for %s after %d attempts: code=%s, msg=%s",
+                    self._host, MAX_LOGIN_RETRIES, error_code, error_msg,
+                )
+                raise MiWiFiAuthError(f"Authentication failed: {error_msg}")
+
+            _LOGGER.error(
+                "Login failed for %s after %d attempts: code=%s, msg=%s",
+                self._host, MAX_LOGIN_RETRIES, error_code, error_msg,
+            )
             raise MiWiFiConnectionError(f"Login failed: {error_msg}")
 
         # Extract stok from the URL field or token field
@@ -193,7 +250,8 @@ class MiWiFiAPIClient:
             raise MiWiFiConnectionError("Could not extract stok from login response")
 
         _LOGGER.info(
-            "Successfully logged in to MiWiFi router at %s (stok will be reused until router rejects it)",
+            "Successfully logged in to MiWiFi router at %s "
+            "(stok will be reused until router rejects it)",
             self._host,
         )
 
@@ -649,9 +707,24 @@ class MiWiFiAPIClient:
         """Test if we can connect and authenticate with the router.
 
         Returns True on success, raises exceptions on failure.
+        After successful test, calls logout() to clean up the server-side
+        session so the integration's first login won't get "not auth".
         """
-        await self._login()
-        return True
+        try:
+            await self._login()
+            return True
+        finally:
+            # Always logout after test to prevent session conflicts
+            # when the integration starts its own login
+            if self._stok:
+                _LOGGER.debug(
+                    "Test connection succeeded, logging out to clean session for %s",
+                    self._host,
+                )
+                try:
+                    await self.logout()
+                except Exception as err:
+                    _LOGGER.debug("Post-test logout failed (non-fatal): %s", err)
 
     @property
     def model(self) -> str:
@@ -667,3 +740,14 @@ class MiWiFiAPIClient:
     def mac(self) -> str:
         """Return the router MAC address."""
         return self._mac or ""
+
+    def invalidate_stok(self) -> None:
+        """Mark the current stok as invalid.
+
+        Called by the coordinator when it detects auth errors in the data
+        (e.g., code > 0 in response body), so the next API call will
+        trigger a re-login.
+        """
+        if self._stok:
+            _LOGGER.debug("Stok invalidated for %s", self._host)
+            self._stok = None

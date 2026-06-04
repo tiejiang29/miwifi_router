@@ -58,6 +58,9 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Test connection with hass for non-blocking aiohttp
             api = MiWiFiAPIClient(host, password, hass=self.hass)
             try:
+                # test_connection() now handles logout automatically after
+                # a successful login, so the router session is cleaned up
+                # before the integration starts its own session
                 await api.test_connection()
                 # Login succeeded, get model info for the entry title
                 model = api.model

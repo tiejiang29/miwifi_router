@@ -34,7 +34,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Create API client with hass instance for non-blocking aiohttp session
     api = MiWiFiAPIClient(host, password, hass=hass)
 
-    # Create coordinator with layered polling
+    # Create coordinator with layered polling and re-authorization support
     coordinator = MiWiFiCoordinator(
         hass=hass,
         api=api,
@@ -46,7 +46,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Perform first data fetch
+    # Perform first data fetch (includes retry with backoff on failure)
     await coordinator.async_config_entry_first_refresh()
 
     # Set up platforms (sensors + device trackers)

@@ -16,6 +16,9 @@ DEFAULT_DEVICE_SCAN_INTERVAL = 30  # seconds - for device list details
 # Login endpoint - does NOT use stok, accessed directly
 API_LOGIN = "/cgi-bin/luci/api/xqsystem/login"
 
+# Logout endpoint - uses stok to end the session
+API_LOGOUT = "/web/logout"
+
 # Authenticated endpoints - accessed via /cgi-bin/luci/;stok=XXX{endpoint}
 # These paths are based on diagnostic results from BE5000 (RD18) firmware 1.0.53
 API_STATUS = "/api/misystem/status"              # Device speeds + WAN stats
