@@ -31,8 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
     )
 
-    # Create API client
-    api = MiWiFiAPIClient(host, password)
+    # Create API client with hass instance for non-blocking aiohttp session
+    api = MiWiFiAPIClient(host, password, hass=hass)
 
     # Create coordinator with layered polling
     coordinator = MiWiFiCoordinator(

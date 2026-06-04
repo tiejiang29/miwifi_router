@@ -55,8 +55,8 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(host)
             self._abort_if_unique_id_configured()
 
-            # Test connection
-            api = MiWiFiAPIClient(host, password)
+            # Test connection with hass for non-blocking aiohttp
+            api = MiWiFiAPIClient(host, password, hass=self.hass)
             try:
                 success = await api.test_connection()
                 if success:

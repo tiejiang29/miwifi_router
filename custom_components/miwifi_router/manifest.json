@@ -3,10 +3,9 @@
   "name": "MiWiFi Router",
   "codeowners": [],
   "config_flow": true,
-  "icon": "mdi:router-wireless",
   "documentation": "https://github.com/tiejiang29/miwifi_router",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/tiejiang29/miwifi_router/issues",
-  "requirements": ["httpx>=0.24.0"],
-  "version": "1.0.1"
+  "requirements": [],
+  "version": "1.0.2"
 }

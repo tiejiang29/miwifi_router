@@ -1,4 +1,4 @@
-"""MiWiFi Router API Client with HTTP Keep-Alive, stok caching, and layered polling."""
+"""MiWiFi Router API Client with aiohttp, stok caching, and layered polling."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import random
 import time
 from typing import Any
 
-import httpx
+import aiohttp
+
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     API_DEVICE_LIST,
@@ -25,6 +27,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Timeout for API requests
+REQUEST_TIMEOUT = 10
+
 
 class MiWiFiAuthError(Exception):
     """Authentication error."""
@@ -35,42 +40,34 @@ class MiWiFiConnectionError(Exception):
 
 
 class MiWiFiAPIClient:
-    """API client for MiWiFi router with connection pooling and stok caching."""
+    """API client for MiWiFi router with connection pooling and stok caching.
 
-    def __init__(self, host: str, password: str) -> None:
+    Uses HA's built-in aiohttp client session for non-blocking HTTP requests.
+    """
+
+    def __init__(self, host: str, password: str, hass=None) -> None:
         self._host = host
         self._password = password
         self._base_url = f"http://{host}"
+        self._hass = hass
         self._stok: str | None = None
         self._stok_expire: float = 0
         self._init_info: dict[str, Any] | None = None
         self._init_info_expire: float = 0
-        # HTTP Keep-Alive: reuse TCP connections across requests
-        self._client: httpx.AsyncClient | None = None
         self._mac: str | None = None
         self._model: str | None = None
         self._firmware: str | None = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the httpx client with connection pooling."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self._base_url,
-                timeout=httpx.Timeout(10.0, connect=5.0),
-                limits=httpx.Limits(
-                    max_keepalive_connections=2,
-                    max_connections=4,
-                    keepalive_expiry=30.0,
-                ),
-                follow_redirects=True,
-            )
-        return self._client
+    def _get_session(self) -> aiohttp.ClientSession:
+        """Get HA's shared aiohttp client session (non-blocking)."""
+        if self._hass is not None:
+            return async_get_clientsession(self._hass)
+        # Fallback: should not happen in normal HA usage
+        raise RuntimeError("Home Assistant instance not provided to MiWiFiAPIClient")
 
     async def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-            self._client = None
+        """Close any resources. HA manages the shared session, so nothing to close."""
+        pass
 
     # ---- Authentication ----
 
@@ -106,43 +103,47 @@ class MiWiFiAPIClient:
 
     async def _login(self) -> None:
         """Authenticate with the router and cache the stok."""
-        client = await self._get_client()
+        session = self._get_session()
 
         # First, get init_info to extract MAC for nonce generation
+        init_info_url = f"{self._base_url}{API_INIT_INFO}"
         try:
-            resp = await client.get(API_INIT_INFO)
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("code") == 0:
-                    self._mac = data.get("mac", self._mac)
-                    hardware = data.get("hardware", {})
-                    self._model = hardware.get("displayName", "MiWiFi Router")
-                    self._firmware = hardware.get("version", "unknown")
+            async with session.get(
+                init_info_url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    if data.get("code") == 0:
+                        self._mac = data.get("mac", self._mac)
+                        hardware = data.get("hardware", {})
+                        self._model = hardware.get("displayName", "MiWiFi Router")
+                        self._firmware = hardware.get("version", "unknown")
         except Exception:
             _LOGGER.debug("Could not fetch init_info during login")
 
         nonce = self._generate_nonce()
         password = self._build_login_password(nonce)
 
+        login_url = f"{self._base_url}{API_LOGIN}"
         try:
-            resp = await client.post(
-                API_LOGIN,
+            async with session.post(
+                login_url,
                 data={
                     "username": "admin",
                     "password": password,
                     "logtype": "2",
                     "nonce": nonce,
                 },
-            )
-        except httpx.HTTPError as err:
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    raise MiWiFiConnectionError(
+                        f"Login HTTP error: status {resp.status}"
+                    )
+                data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
             raise MiWiFiConnectionError(f"Cannot connect to router: {err}") from err
 
-        if resp.status_code != 200:
-            raise MiWiFiConnectionError(
-                f"Login HTTP error: status {resp.status_code}"
-            )
-
-        data = resp.json()
         if data.get("code") != 0:
             error_msg = data.get("msg", "Unknown error")
             if "密码错误" in str(error_msg) or data.get("code") == 401:
@@ -166,29 +167,36 @@ class MiWiFiAPIClient:
     async def _api_get(self, endpoint: str) -> dict[str, Any]:
         """Make an authenticated API GET request."""
         stok = await self._ensure_stok()
-        client = await self._get_client()
-        url = f"/cgi-bin/luci/;stok={stok}{endpoint}"
+        session = self._get_session()
+        url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{endpoint}"
 
         try:
-            resp = await client.get(url)
-        except httpx.HTTPError as err:
-            # Connection lost, invalidate stok for next attempt
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            ) as resp:
+                if resp.status == 401 or resp.status == 403:
+                    # Stok expired, clear and retry once
+                    self._stok = None
+                    stok = await self._ensure_stok()
+                    url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{endpoint}"
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+                    ) as resp2:
+                        if resp2.status != 200:
+                            raise MiWiFiConnectionError(
+                                f"API error: {endpoint} returned status {resp2.status}"
+                            )
+                        data = await resp2.json(content_type=None)
+                elif resp.status != 200:
+                    raise MiWiFiConnectionError(
+                        f"API error: {endpoint} returned status {resp.status}"
+                    )
+                else:
+                    data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
             self._stok = None
             raise MiWiFiConnectionError(f"API request failed: {err}") from err
 
-        if resp.status_code == 401 or resp.status_code == 403:
-            # Stok expired, clear and retry once
-            self._stok = None
-            stok = await self._ensure_stok()
-            url = f"/cgi-bin/luci/;stok={stok}{endpoint}"
-            resp = await client.get(url)
-
-        if resp.status_code != 200:
-            raise MiWiFiConnectionError(
-                f"API error: {endpoint} returned status {resp.status_code}"
-            )
-
-        data = resp.json()
         if data.get("code") == 401:
             self._stok = None
             raise MiWiFiAuthError("Stok expired, re-authentication needed")
