@@ -71,28 +71,28 @@ async def async_setup_entry(
         SensorEntityDescription(
             key="download_speed",
             name="Download Speed",
-            native_unit_of_measurement=UnitOfDataRate.KILOBYTES_PER_SECOND,
+            native_unit_of_measurement=UnitOfDataRate.BYTES_PER_SECOND,
             icon="mdi:download",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="upload_speed",
             name="Upload Speed",
-            native_unit_of_measurement=UnitOfDataRate.KILOBYTES_PER_SECOND,
+            native_unit_of_measurement=UnitOfDataRate.BYTES_PER_SECOND,
             icon="mdi:upload",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="download_total",
             name="Download Total",
-            native_unit_of_measurement=UnitOfInformation.MEGABYTES,
+            native_unit_of_measurement=UnitOfInformation.BYTES,
             icon="mdi:download-circle",
             state_class=SensorStateClass.TOTAL_INCREASING,
         ),
         SensorEntityDescription(
             key="upload_total",
             name="Upload Total",
-            native_unit_of_measurement=UnitOfInformation.MEGABYTES,
+            native_unit_of_measurement=UnitOfInformation.BYTES,
             icon="mdi:upload-circle",
             state_class=SensorStateClass.TOTAL_INCREASING,
         ),
@@ -173,32 +173,28 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
         if key == "download_speed":
             value = status.get("wan", {}).get("downspeed", 0)
-            # Convert B/s → KB/s for native value
-            self._attr_native_value = round(value / 1024, 2) if value else 0
+            self._attr_native_value = value
             self._attr_extra_state_attributes = {
                 "human_readable": _format_speed(value),
             }
 
         elif key == "upload_speed":
             value = status.get("wan", {}).get("upspeed", 0)
-            # Convert B/s → KB/s for native value
-            self._attr_native_value = round(value / 1024, 2) if value else 0
+            self._attr_native_value = value
             self._attr_extra_state_attributes = {
                 "human_readable": _format_speed(value),
             }
 
         elif key == "download_total":
             value = status.get("wan", {}).get("download", 0)
-            # Convert B → MB for native value
-            self._attr_native_value = round(value / (1024 * 1024), 2) if value else 0
+            self._attr_native_value = value
             self._attr_extra_state_attributes = {
                 "human_readable": _format_bytes(value),
             }
 
         elif key == "upload_total":
             value = status.get("wan", {}).get("upload", 0)
-            # Convert B → MB for native value
-            self._attr_native_value = round(value / (1024 * 1024), 2) if value else 0
+            self._attr_native_value = value
             self._attr_extra_state_attributes = {
                 "human_readable": _format_bytes(value),
             }
