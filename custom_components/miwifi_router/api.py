@@ -15,6 +15,7 @@ Key design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import random
@@ -132,19 +133,85 @@ class MiWiFiAPIClient:
         2. GET the router's root page first - this triggers the router to
            clear any stale server-side session associated with our IP.
         3. POST the login data with SHA256+SHA256 hashed password
-        4. Extract stok from response
+        4. If "not auth" (session conflict), wait 2s and retry once
+        5. Extract stok from response
 
         The stok is kept indefinitely (no local expiry). The router
         maintains the session server-side. When the router eventually
         invalidates it, we'll get a 401 and re-login then.
+        """
+        max_attempts = 2  # 1 normal + 1 retry for session conflict
+
+        for attempt in range(1, max_attempts + 1):
+            data = await self._do_login_request(attempt)
+
+            if data.get("code") == 0:
+                break  # Success!
+
+            error_msg = data.get("msg", "Unknown error")
+            error_code = data.get("code")
+
+            # "not auth" with code 401 usually means session conflict
+            # (another login is still active). Retry after a short wait.
+            if (
+                "not auth" in str(error_msg) or error_code == 401
+            ) and attempt < max_attempts:
+                _LOGGER.warning(
+                    "Login attempt %d got 'not auth' (session conflict), "
+                    "waiting 2s before retry for %s",
+                    attempt, self._host,
+                )
+                await asyncio.sleep(2)
+                continue
+
+            # "密码错误" is a real wrong password - don't retry
+            if "密码错误" in str(error_msg):
+                _LOGGER.error(
+                    "Login failed for %s: wrong password (code=%s)",
+                    self._host, error_code,
+                )
+                raise MiWiFiAuthError(f"Invalid password: {error_msg}")
+
+            # Other error - don't retry
+            _LOGGER.error(
+                "Login failed for %s: code=%s, msg=%s",
+                self._host, error_code, error_msg,
+            )
+            if error_code == 401:
+                raise MiWiFiAuthError(f"Invalid password: {error_msg}")
+            raise MiWiFiConnectionError(f"Login failed: {error_msg}")
+
+        # Extract stok from the URL field or token field
+        url = data.get("url", "")
+        if ";stok=" in url:
+            self._stok = url.split(";stok=")[1].split("/")[0]
+        else:
+            self._stok = data.get("token", "")
+
+        if not self._stok:
+            _LOGGER.error("Could not extract stok from login response: %s", data)
+            raise MiWiFiConnectionError("Could not extract stok from login response")
+
+        _LOGGER.info(
+            "Successfully logged in to MiWiFi router at %s (stok will be reused until router rejects it)",
+            self._host,
+        )
+
+        # After successful login, try to get router info
+        await self._fetch_router_info_after_login()
+
+    async def _do_login_request(self, attempt: int = 1) -> dict[str, Any]:
+        """Send a single login POST request and return the response dict.
+
+        This is called by _login() which handles retries on session conflict.
         """
         nonce = self._generate_nonce()
         password = self._build_login_password(nonce)
         login_url = f"{self._base_url}{API_LOGIN}"
 
         _LOGGER.debug(
-            "Attempting login to %s | nonce=%s | pwd_hash_len=%d",
-            self._host, nonce, len(password),
+            "Login attempt %d to %s | nonce=%s | pwd_hash_len=%d",
+            attempt, self._host, nonce, len(password),
         )
 
         # Use a fresh session for login to avoid stale cookie interference
@@ -199,6 +266,7 @@ class MiWiFiAPIClient:
                         data.get("code"),
                         data.get("msg"),
                     )
+                    return data
 
             except aiohttp.ClientError as err:
                 _LOGGER.error("Cannot connect to router at %s: %s", self._host, err)
@@ -210,40 +278,6 @@ class MiWiFiAPIClient:
             except Exception as err:
                 _LOGGER.error("Unexpected login error: %s", err)
                 raise MiWiFiConnectionError(f"Login error: {err}") from err
-
-        if data.get("code") != 0:
-            error_msg = data.get("msg", "Unknown error")
-            error_code = data.get("code")
-            _LOGGER.error(
-                "Login failed for %s: code=%s, msg=%s",
-                self._host, error_code, error_msg,
-            )
-            if (
-                "密码错误" in str(error_msg)
-                or "not auth" in str(error_msg)
-                or error_code == 401
-            ):
-                raise MiWiFiAuthError(f"Invalid password: {error_msg}")
-            raise MiWiFiConnectionError(f"Login failed: {error_msg}")
-
-        # Extract stok from the URL field or token field
-        url = data.get("url", "")
-        if ";stok=" in url:
-            self._stok = url.split(";stok=")[1].split("/")[0]
-        else:
-            self._stok = data.get("token", "")
-
-        if not self._stok:
-            _LOGGER.error("Could not extract stok from login response: %s", data)
-            raise MiWiFiConnectionError("Could not extract stok from login response")
-
-        _LOGGER.info(
-            "Successfully logged in to MiWiFi router at %s (stok will be reused until router rejects it)",
-            self._host,
-        )
-
-        # After successful login, try to get router info
-        await self._fetch_router_info_after_login()
 
     async def _fetch_router_info_after_login(self) -> None:
         """After login, fetch router hardware info from available endpoints."""
