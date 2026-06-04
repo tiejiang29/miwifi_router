@@ -12,9 +12,12 @@ Re-authorization strategy (inspired by hass-miwifi):
 - _is_first_update flag: on the very first update, if it fails,
   retry with exponential backoff (up to MAX_RETRIES times) before
   giving up. This handles transient issues during startup.
-- Grace period: when a non-first update gets an auth error, we keep
-  entities "available" for one more cycle. Only if re-auth also fails
-  do entities become unavailable. This prevents entity flickering.
+- Grace period: when a non-first update gets an auth error, we return
+  the previous data instead of raising UpdateFailed. This keeps
+  entities available for one more cycle. Only if re-auth also fails
+  do we raise UpdateFailed and entities become unavailable.
+  CoordinatorEntity.available uses coordinator.last_update_success,
+  which stays True as long as we return data (not raise).
 """
 
 from __future__ import annotations
@@ -53,8 +56,6 @@ class MiWiFiRouterData:
         self.devices: dict[str, dict[str, Any]] = {}
         # Previous online count for change detection
         self._prev_online_count: int = -1
-        # Whether the router is currently reachable/authenticated
-        self.connected: bool = False
 
     def get_online_count(self) -> int:
         """Get current online device count."""
@@ -114,7 +115,8 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
     Inspired by hass-miwifi's LuciUpdater pattern:
     - _is_reauthorization: set True when auth fails, triggers re-login next cycle
     - _is_first_update: enables retry with backoff on first update
-    - Grace period: entities stay available during first auth failure
+    - Grace period: return previous data on first auth failure instead of
+      raising UpdateFailed — this keeps CoordinatorEntity.available = True
     """
 
     def __init__(
@@ -162,8 +164,8 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
         2. If data fetch fails with auth error, set _is_reauthorization = True
            for the next cycle
         3. On first update, retry with exponential backoff on failure
-        4. Grace period: on non-first update, keep entities available for
-           one cycle even if auth fails
+        4. Grace period: on non-first update, return previous data instead
+           of raising UpdateFailed — this keeps entities available
         """
         return await self._update_with_retry()
 
@@ -218,7 +220,6 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
 
             # Success! Clear flags
             self._is_reauthorization = False
-            self._data.connected = True
             self._auth_failures = 0
 
             if self._is_first_update:
@@ -236,14 +237,15 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
             self._is_reauthorization = True
 
             # Grace period: on non-first update, if we weren't already
-            # in re-authorization before this cycle, keep entities available
-            # for one more cycle. This prevents entity flickering.
+            # in re-authorization before this cycle, return previous data
+            # instead of raising UpdateFailed. This keeps
+            # coordinator.last_update_success = True, so entities stay
+            # available for one more cycle. Next cycle will re-login.
             if not self._is_first_update and not _was_reauthorization:
                 _LOGGER.warning(
-                    "Auth error during poll for %s (grace period, keeping data): %s",
+                    "Auth error during poll for %s (grace period, returning previous data): %s",
                     self._api._host, err,
                 )
-                self._data.connected = True  # Keep available during grace period
                 return self._data
 
             # First update: retry with exponential backoff
@@ -264,13 +266,11 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
                     "Please check your password and reconfigure the integration.",
                     self._auth_failures, self._api._host,
                 )
-            self._data.connected = False
             raise UpdateFailed(f"Authentication error: {err}") from err
 
         except MiWiFiConnectionError as err:
             # Connection errors don't trigger re-authorization
             self._is_reauthorization = False
-            self._data.connected = False
 
             # First update: retry with exponential backoff
             if self._is_first_update and retry < MAX_FIRST_UPDATE_RETRIES:
@@ -286,8 +286,6 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Connection error: {err}") from err
 
         except Exception as err:
-            self._data.connected = False
-
             # First update: retry with exponential backoff
             if self._is_first_update and retry < MAX_FIRST_UPDATE_RETRIES:
                 backoff = (retry + 1) * 2

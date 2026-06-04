@@ -78,11 +78,6 @@ class MiWiFiTrackerManager:
         data = self._coordinator.router_data
         devices = data.devices
 
-        # If router is not connected, don't update trackers
-        # (keep their last known state)
-        if not data.connected:
-            return
-
         new_entities: list[MiWiFiDeviceTracker] = []
 
         for mac, dev_data in devices.items():
@@ -153,11 +148,6 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         # Initial connection state
         online_val = dev_data.get("online", 0)
         self._attr_is_connected = int(online_val) > 0 if online_val else False
-
-    @property
-    def available(self) -> bool:
-        """Return True if the router is connected."""
-        return self.coordinator.router_data.connected
 
     @callback
     def _handle_coordinator_update(self) -> None:
