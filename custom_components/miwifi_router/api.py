@@ -28,7 +28,7 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 # Timeout for API requests
-REQUEST_TIMEOUT = 10
+REQUEST_TIMEOUT = 15
 
 
 class MiWiFiAuthError(Exception):
@@ -62,7 +62,6 @@ class MiWiFiAPIClient:
         """Get HA's shared aiohttp client session (non-blocking)."""
         if self._hass is not None:
             return async_get_clientsession(self._hass)
-        # Fallback: should not happen in normal HA usage
         raise RuntimeError("Home Assistant instance not provided to MiWiFiAPIClient")
 
     async def close(self) -> None:
@@ -101,30 +100,57 @@ class MiWiFiAPIClient:
         await self._login()
         return self._stok  # type: ignore[return-value]
 
+    async def _fetch_init_info_unauth(self) -> None:
+        """Try to fetch init_info without authentication to get MAC for nonce.
+
+        Some firmware versions allow this, some don't. We try multiple paths.
+        Failure is non-fatal - we fall back to a dummy MAC.
+        """
+        session = self._get_session()
+        # Try multiple possible paths for init_info
+        paths = [
+            "/api/xqsystem/init_info",
+            "/cgi-bin/luci/api/xqsystem/init_info",
+        ]
+        for path in paths:
+            url = f"{self._base_url}{path}"
+            try:
+                async with session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if data.get("code") == 0:
+                            self._mac = data.get("mac", self._mac)
+                            hardware = data.get("hardware", {})
+                            if hardware.get("displayName"):
+                                self._model = hardware["displayName"]
+                            if hardware.get("version"):
+                                self._firmware = hardware["version"]
+                            _LOGGER.debug(
+                                "Got init_info: mac=%s, model=%s",
+                                self._mac,
+                                self._model,
+                            )
+                            return
+            except Exception as err:
+                _LOGGER.debug("init_info path %s failed: %s", path, err)
+
+        _LOGGER.debug("Could not fetch init_info, using fallback MAC")
+
     async def _login(self) -> None:
         """Authenticate with the router and cache the stok."""
         session = self._get_session()
 
-        # First, get init_info to extract MAC for nonce generation
-        init_info_url = f"{self._base_url}{API_INIT_INFO}"
-        try:
-            async with session.get(
-                init_info_url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    if data.get("code") == 0:
-                        self._mac = data.get("mac", self._mac)
-                        hardware = data.get("hardware", {})
-                        self._model = hardware.get("displayName", "MiWiFi Router")
-                        self._firmware = hardware.get("version", "unknown")
-        except Exception:
-            _LOGGER.debug("Could not fetch init_info during login")
+        # Try to get MAC from init_info (non-fatal if fails)
+        await self._fetch_init_info_unauth()
 
         nonce = self._generate_nonce()
         password = self._build_login_password(nonce)
 
         login_url = f"{self._base_url}{API_LOGIN}"
+        _LOGGER.debug("Attempting login to %s", login_url)
+
         try:
             async with session.post(
                 login_url,
@@ -135,18 +161,40 @@ class MiWiFiAPIClient:
                     "nonce": nonce,
                 },
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                allow_redirects=False,
             ) as resp:
+                _LOGGER.debug("Login response status: %s", resp.status)
+
                 if resp.status != 200:
+                    resp_text = await resp.text()
+                    _LOGGER.error(
+                        "Login HTTP error: status %s, body: %s",
+                        resp.status,
+                        resp_text[:200],
+                    )
                     raise MiWiFiConnectionError(
                         f"Login HTTP error: status {resp.status}"
                     )
+
                 data = await resp.json(content_type=None)
+                _LOGGER.debug("Login response code: %s", data.get("code"))
+
         except aiohttp.ClientError as err:
+            _LOGGER.error("Cannot connect to router at %s: %s", self._host, err)
             raise MiWiFiConnectionError(f"Cannot connect to router: {err}") from err
+        except MiWiFiConnectionError:
+            raise
+        except Exception as err:
+            _LOGGER.error("Unexpected login error: %s", err)
+            raise MiWiFiConnectionError(f"Login error: {err}") from err
 
         if data.get("code") != 0:
             error_msg = data.get("msg", "Unknown error")
-            if "密码错误" in str(error_msg) or data.get("code") == 401:
+            error_code = data.get("code")
+            _LOGGER.error(
+                "Login failed: code=%s, msg=%s", error_code, error_msg
+            )
+            if "密码错误" in str(error_msg) or error_code == 401:
                 raise MiWiFiAuthError(f"Invalid password: {error_msg}")
             raise MiWiFiConnectionError(f"Login failed: {error_msg}")
 
@@ -155,10 +203,10 @@ class MiWiFiAPIClient:
         if ";stok=" in url:
             self._stok = url.split(";stok=")[1].split("/")[0]
         else:
-            # Fallback: try to extract from token field
             self._stok = data.get("token", "")
 
         if not self._stok:
+            _LOGGER.error("Could not extract stok from login response: %s", data)
             raise MiWiFiConnectionError("Could not extract stok from login response")
 
         self._stok_expire = time.time() + STOK_CACHE_SECONDS
@@ -298,11 +346,9 @@ class MiWiFiAPIClient:
         }
 
         # Parse device list - the structure varies by firmware
-        # Try both 'list' and direct array formats
         raw_devs = data.get("list", data.get("dev", []))
         if isinstance(raw_devs, dict):
             raw_devs = list(raw_devs.values())
-            # Flatten if nested
             flat_devs = []
             for v in raw_devs:
                 if isinstance(v, list):
@@ -344,11 +390,7 @@ class MiWiFiAPIClient:
         return result
 
     async def get_init_info(self) -> dict[str, Any]:
-        """Get router hardware/firmware info (static, poll infrequently).
-
-        This endpoint returns information that rarely changes.
-        Cache it for 5 minutes internally.
-        """
+        """Get router hardware/firmware info (static, poll infrequently)."""
         if self._init_info and time.time() < self._init_info_expire:
             return self._init_info
 
@@ -370,11 +412,9 @@ class MiWiFiAPIClient:
 
         result["mac"] = data.get("mac", "")
 
-        # Cache for 5 minutes
         self._init_info = result
         self._init_info_expire = time.time() + 300
 
-        # Also update model info
         if hardware.get("displayName"):
             self._model = hardware["displayName"]
         if hardware.get("version"):
@@ -402,11 +442,21 @@ class MiWiFiAPIClient:
         return result
 
     async def test_connection(self) -> bool:
-        """Test if we can connect and authenticate with the router."""
+        """Test if we can connect and authenticate with the router.
+
+        Returns True on success, False on failure. Logs errors for debugging.
+        """
         try:
             await self._login()
             return True
-        except (MiWiFiAuthError, MiWiFiConnectionError):
+        except MiWiFiAuthError as err:
+            _LOGGER.warning("Authentication failed for %s: %s", self._host, err)
+            return False
+        except MiWiFiConnectionError as err:
+            _LOGGER.warning("Connection failed for %s: %s", self._host, err)
+            return False
+        except Exception as err:
+            _LOGGER.error("Unexpected error testing connection to %s: %s", self._host, err)
             return False
 
     @property

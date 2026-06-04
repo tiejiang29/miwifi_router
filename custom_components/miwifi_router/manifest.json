@@ -3,9 +3,10 @@
   "name": "MiWiFi Router",
   "codeowners": [],
   "config_flow": true,
+  "icon": "icon.png",
   "documentation": "https://github.com/tiejiang29/miwifi_router",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/tiejiang29/miwifi_router/issues",
   "requirements": [],
-  "version": "1.0.2"
+  "version": "1.0.3"
 }
