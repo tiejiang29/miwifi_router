@@ -52,6 +52,10 @@ class MiWiFiTrackerManager:
 
     New devices are added as they appear; offline devices stay in the registry
     as 'not_home' so that automations can still trigger on state changes.
+
+    IMPORTANT: We must NOT call async_write_ha_state() on entities that haven't
+    been fully added to HA yet. The _pending_entities set tracks entities that
+    have been created but not yet added via async_add_entities.
     """
 
     def __init__(
@@ -78,8 +82,8 @@ class MiWiFiTrackerManager:
 
         for mac, dev_data in devices.items():
             if mac in self._known_devices:
-                # Update existing tracker data
-                self._known_devices[mac].update_data(dev_data)
+                # Update existing tracker data (only if entity is fully registered)
+                self._known_devices[mac].set_dev_data(dev_data)
             else:
                 # Create new tracker for newly seen device
                 tracker = MiWiFiDeviceTracker(
@@ -93,13 +97,16 @@ class MiWiFiTrackerManager:
                 new_entities.append(tracker)
 
         if new_entities:
+            # async_add_entities will call async_added_to_hass on each entity,
+            # which sets self.hass and self.entity_id. Only AFTER that can we
+            # safely call async_write_ha_state().
             self._async_add_entities(new_entities, update_before_add=True)
 
         # Mark devices not in current poll as offline
         current_macs = set(devices.keys())
         for mac, tracker in self._known_devices.items():
             if mac not in current_macs:
-                tracker.update_data({**tracker._dev_data, "online": 0})
+                tracker.set_dev_data({**tracker._dev_data, "online": 0})
 
 
 class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
@@ -133,7 +140,6 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         # Friendly name - prefer hostname from device_list, then devname
         name = dev_data.get("name", "")
         if not name or name == mac:
-            # Try hostname field (from xqsystem/device_list)
             name = dev_data.get("hostname", dev_data.get("name", ""))
         if not name or name == mac:
             name = f"Device {mac}"
@@ -145,8 +151,37 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Handle coordinator update - data is managed by MiWiFiTrackerManager."""
+        """Handle coordinator update - update device data from merged data."""
+        # Look up our device in the coordinator's merged device data
+        devices = self.coordinator.router_data.devices
+        if self._mac in devices:
+            self._update_from_data(devices[self._mac])
         self.async_write_ha_state()
+
+    def _update_from_data(self, dev_data: dict[str, Any]) -> None:
+        """Update internal state from device data dict."""
+        self._dev_data = dev_data
+        online_val = dev_data.get("online", 0)
+        self._attr_is_connected = int(online_val) > 0 if online_val else False
+
+        # Update name if we got a more descriptive one
+        name = dev_data.get("name", "")
+        hostname = dev_data.get("hostname", "")
+        preferred_name = hostname if hostname and hostname != self._mac else name
+        if preferred_name and preferred_name != self._mac and preferred_name.strip():
+            self._attr_name = preferred_name
+
+    def set_dev_data(self, dev_data: dict[str, Any]) -> None:
+        """Set device data. Only writes HA state if entity is fully registered.
+
+        This is called by the tracker manager from the coordinator listener
+        callback. New entities may not have self.hass set yet, so we must
+        check before calling async_write_ha_state().
+        """
+        self._update_from_data(dev_data)
+        # Only write state if entity has been fully added to HA
+        if self.hass is not None and self.entity_id is not None:
+            self.async_write_ha_state()
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -242,19 +277,3 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         if total_bytes >= 1_000:
             return f"{total_bytes / 1_000:.2f} KB"
         return f"{total_bytes} B"
-
-    def update_data(self, dev_data: dict[str, Any]) -> None:
-        """Update device data and connection state."""
-        self._dev_data = dev_data
-        online_val = dev_data.get("online", 0)
-        self._attr_is_connected = int(online_val) > 0 if online_val else False
-
-        # Update name if we got a more descriptive one
-        name = dev_data.get("name", "")
-        hostname = dev_data.get("hostname", "")
-        # Prefer hostname from device_list if available
-        preferred_name = hostname if hostname and hostname != self._mac else name
-        if preferred_name and preferred_name != self._mac and preferred_name.strip():
-            self._attr_name = preferred_name
-
-        self.async_write_ha_state()

@@ -4,12 +4,17 @@ Key design decisions:
 - Login uses a FRESH aiohttp session (not HA's shared session) to avoid stale
   cookie interference. HA's shared session may contain expired sysauth cookies
   that cause the router to reject login with "not auth".
+- Before each login POST, we GET the router's root page first. This triggers
+  the router to clear any stale server-side session state associated with our
+  IP address. Without this step, re-login after stok expiry fails because the
+  router still considers the old session active.
 - All authenticated requests use HA's shared session with stok in the URL.
 - BE5000 (RD18) uses SHA256+SHA256 for password hashing.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import random
@@ -115,14 +120,14 @@ class MiWiFiAPIClient:
     async def _login(self) -> None:
         """Authenticate with the router and cache the stok.
 
-        IMPORTANT: We use a FRESH aiohttp.ClientSession for the login request,
-        NOT HA's shared session. This is because HA's shared session may contain
-        expired sysauth cookies from previous login attempts, which cause the
-        router to reject the login with "not auth" without processing the POST data.
-
-        The diagnostic script (using urllib with no cookies) proves that the
-        SHA256+SHA256 algorithm works correctly. The issue was solely due to
-        stale cookies in the shared session.
+        Login flow:
+        1. Create a fresh aiohttp session (no stale cookies)
+        2. GET the router's root page first - this triggers the router to
+           clear any stale server-side session associated with our IP.
+           Without this, re-login fails because the router still considers
+           the old session active and returns "not auth".
+        3. POST the login data with SHA256+SHA256 hashed password
+        4. Extract stok from response
         """
         nonce = self._generate_nonce()
         password = self._build_login_password(nonce)
@@ -138,6 +143,24 @@ class MiWiFiAPIClient:
             cookie_jar=aiohttp.CookieJar(unsafe=True),
             connector=aiohttp.TCPConnector(force_close=True),
         ) as login_session:
+            # Step 1: GET root page to clear stale server-side session
+            # This is critical for re-login after stok expiry.
+            # The router associates sessions with client IP, and without
+            # this step, it rejects new login attempts with "not auth".
+            try:
+                async with login_session.get(
+                    self._base_url,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                    allow_redirects=True,
+                ) as pre_resp:
+                    _LOGGER.debug(
+                        "Pre-login GET status: %s (clearing stale session)",
+                        pre_resp.status,
+                    )
+            except Exception as pre_err:
+                _LOGGER.debug("Pre-login GET failed (non-fatal): %s", pre_err)
+
+            # Step 2: POST login data
             try:
                 async with login_session.post(
                     login_url,
