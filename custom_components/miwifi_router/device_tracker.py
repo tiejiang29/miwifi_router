@@ -2,6 +2,11 @@
 
 Provides device online/offline detection and per-device speed monitoring.
 Each connected device appears as a device_tracker entity with speed attributes.
+
+Uses ScannerEntity (not TrackerEntity) because this is a router/network scanner.
+TrackerEntity is for GPS-based trackers and ignores is_connected, causing
+the state to show "unknown". ScannerEntity uses is_connected to determine
+"home" / "not_home" state.
 """
 
 from __future__ import annotations
@@ -10,8 +15,8 @@ import logging
 from typing import Any
 
 from homeassistant.components.device_tracker import (
+    ScannerEntity,
     SourceType,
-    TrackerEntity,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -52,10 +57,6 @@ class MiWiFiTrackerManager:
 
     New devices are added as they appear; offline devices stay in the registry
     as 'not_home' so that automations can still trigger on state changes.
-
-    IMPORTANT: We must NOT call async_write_ha_state() on entities that haven't
-    been fully added to HA yet. The _pending_entities set tracks entities that
-    have been created but not yet added via async_add_entities.
     """
 
     def __init__(
@@ -97,9 +98,6 @@ class MiWiFiTrackerManager:
                 new_entities.append(tracker)
 
         if new_entities:
-            # async_add_entities will call async_added_to_hass on each entity,
-            # which sets self.hass and self.entity_id. Only AFTER that can we
-            # safely call async_write_ha_state().
             self._async_add_entities(new_entities, update_before_add=True)
 
         # Mark devices not in current poll as offline
@@ -109,8 +107,12 @@ class MiWiFiTrackerManager:
                 tracker.set_dev_data({**tracker._dev_data, "online": 0})
 
 
-class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
+class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], ScannerEntity):
     """Representation of a network device tracked by MiWiFi Router.
+
+    Uses ScannerEntity (not TrackerEntity) because:
+    - TrackerEntity is for GPS trackers, ignores is_connected → state = "unknown"
+    - ScannerEntity uses is_connected → state = "home" / "not_home"
 
     Each device shows:
     - State: home / not_home (based on router's 'online' field)
@@ -118,6 +120,7 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
     """
 
     _attr_has_entity_name = True
+    _attr_source_type = SourceType.ROUTER
 
     def __init__(
         self,
@@ -152,7 +155,6 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update - update device data from merged data."""
-        # Look up our device in the coordinator's merged device data
         devices = self.coordinator.router_data.devices
         if self._mac in devices:
             self._update_from_data(devices[self._mac])
@@ -172,12 +174,7 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
             self._attr_name = preferred_name
 
     def set_dev_data(self, dev_data: dict[str, Any]) -> None:
-        """Set device data. Only writes HA state if entity is fully registered.
-
-        This is called by the tracker manager from the coordinator listener
-        callback. New entities may not have self.hass set yet, so we must
-        check before calling async_write_ha_state().
-        """
+        """Set device data. Only writes HA state if entity is fully registered."""
         self._update_from_data(dev_data)
         # Only write state if entity has been fully added to HA
         if self.hass is not None and self.entity_id is not None:
@@ -195,11 +192,6 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         }
 
     @property
-    def source_type(self) -> SourceType:
-        """Return the source type of the device tracker."""
-        return SourceType.ROUTER
-
-    @property
     def ip_address(self) -> str | None:
         """Return the IP address of the device."""
         return self._dev_data.get("ip") or None
@@ -210,9 +202,11 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         return self._mac
 
     @property
-    def is_connected(self) -> bool:
-        """Return if the device is connected."""
-        return self._attr_is_connected
+    def hostname(self) -> str | None:
+        """Return the hostname of the device."""
+        name = self._dev_data.get("name", "")
+        hostname = self._dev_data.get("hostname", "")
+        return hostname or name or None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
