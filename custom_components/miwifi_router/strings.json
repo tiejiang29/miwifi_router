@@ -1,0 +1,64 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "MiWiFi Router",
+        "description": "Set up your Xiaomi MiWiFi router integration.",
+        "data": {
+          "host": "Router IP Address",
+          "password": "Router Admin Password",
+          "scan_interval": "Scan Interval (seconds, default: 10)",
+          "device_scan_interval": "Device List Scan Interval (seconds, default: 30)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the router",
+      "invalid_auth": "Invalid password",
+      "unknown": "Unexpected error occurred"
+    },
+    "abort": {
+      "already_configured": "This router is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "MiWiFi Router Options",
+        "description": "Adjust polling intervals and settings.",
+        "data": {
+          "scan_interval": "Realtime Data Scan Interval (seconds)",
+          "device_scan_interval": "Device List Scan Interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "download_speed": {
+        "name": "Download Speed"
+      },
+      "upload_speed": {
+        "name": "Upload Speed"
+      },
+      "download_total": {
+        "name": "Download Total"
+      },
+      "upload_total": {
+        "name": "Upload Total"
+      },
+      "online_devices": {
+        "name": "Online Devices"
+      },
+      "cpu_load": {
+        "name": "CPU Load"
+      },
+      "memory_usage": {
+        "name": "Memory Usage"
+      },
+      "temperature": {
+        "name": "Temperature"
+      }
+    }
+  }
+}
