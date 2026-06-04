@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import random
@@ -27,7 +26,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Timeout for API requests
 REQUEST_TIMEOUT = 15
 
 
@@ -40,9 +38,10 @@ class MiWiFiConnectionError(Exception):
 
 
 class MiWiFiAPIClient:
-    """API client for MiWiFi router with connection pooling and stok caching.
+    """API client for MiWiFi router with stok caching.
 
     Uses HA's built-in aiohttp client session for non-blocking HTTP requests.
+    Login flow: POST to login endpoint with hashed password → get stok → use stok for all API calls.
     """
 
     def __init__(self, host: str, password: str, hass=None) -> None:
@@ -52,31 +51,23 @@ class MiWiFiAPIClient:
         self._hass = hass
         self._stok: str | None = None
         self._stok_expire: float = 0
-        self._init_info: dict[str, Any] | None = None
+        self._init_info_cache: dict[str, Any] | None = None
         self._init_info_expire: float = 0
         self._mac: str | None = None
         self._model: str | None = None
         self._firmware: str | None = None
 
     def _get_session(self) -> aiohttp.ClientSession:
-        """Get HA's shared aiohttp client session (non-blocking)."""
+        """Get HA's shared aiohttp client session."""
         if self._hass is not None:
             return async_get_clientsession(self._hass)
-        raise RuntimeError("Home Assistant instance not provided to MiWiFiAPIClient")
+        raise RuntimeError("Home Assistant instance not provided")
 
     async def close(self) -> None:
-        """Close any resources. HA manages the shared session, so nothing to close."""
+        """Nothing to close - HA manages the shared session."""
         pass
 
     # ---- Authentication ----
-
-    def _generate_nonce(self) -> str:
-        """Generate a nonce for login: {type}_{mac}_{time}_{random}."""
-        nonce_type = 0
-        mac = self._mac or "00:00:00:00:00:00"
-        now = int(time.time())
-        rand = random.randint(1000, 9999)
-        return f"{nonce_type}_{mac}_{now}_{rand}"
 
     @staticmethod
     def _sha1(text: str) -> str:
@@ -87,12 +78,28 @@ class MiWiFiAPIClient:
         """Build the login password hash.
 
         Algorithm: sha1(nonce + sha1(password + public_key))
+        This is the standard MiWiFi login algorithm used by all firmware versions.
+        The nonce format does NOT need the real MAC - any valid format works.
         """
         pwd_hash = self._sha1(self._password + PUBLIC_KEY)
         return self._sha1(nonce + pwd_hash)
 
+    @staticmethod
+    def _generate_nonce() -> str:
+        """Generate a nonce for login.
+
+        Format: {type}_{mac}_{timestamp}_{random}
+        The MAC in nonce is NOT validated by the router - it's just salt.
+        We use a placeholder MAC since we don't know the real one before login.
+        """
+        nonce_type = 0
+        placeholder_mac = "00:00:00:00:00:00"
+        now = int(time.time())
+        rand = random.randint(1000, 9999)
+        return f"{nonce_type}_{placeholder_mac}_{now}_{rand}"
+
     async def _ensure_stok(self) -> str:
-        """Ensure we have a valid stok, refreshing if needed."""
+        """Ensure we have a valid stok, re-login if expired."""
         if self._stok and time.time() < self._stok_expire:
             return self._stok
 
@@ -100,56 +107,27 @@ class MiWiFiAPIClient:
         await self._login()
         return self._stok  # type: ignore[return-value]
 
-    async def _fetch_init_info_unauth(self) -> None:
-        """Try to fetch init_info without authentication to get MAC for nonce.
+    async def _login(self) -> None:
+        """Authenticate with the router and cache the stok.
 
-        Some firmware versions allow this, some don't. We try multiple paths.
-        Failure is non-fatal - we fall back to a dummy MAC.
+        Login flow:
+        1. Generate nonce (no need for real MAC)
+        2. Hash password with nonce
+        3. POST to login endpoint
+        4. Extract stok from response
+
+        Note: We do NOT try to fetch init_info before login because
+        /api/misystem/init_info requires stok authentication on BE5000 (RD18).
+        This is a chicken-and-egg problem - we need stok to get info,
+        but we need info for the nonce. The solution: the nonce MAC is
+        not validated by the router, so we use a placeholder.
         """
         session = self._get_session()
-        # Try multiple possible paths for init_info (different firmware versions)
-        paths = [
-            "/api/misystem/init_info",
-            "/api/xqsystem/init_info",
-        ]
-        for path in paths:
-            url = f"{self._base_url}{path}"
-            try:
-                async with session.get(
-                    url, timeout=aiohttp.ClientTimeout(total=5)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        if data.get("code") == 0:
-                            self._mac = data.get("mac", self._mac)
-                            hardware = data.get("hardware", {})
-                            if hardware.get("displayName"):
-                                self._model = hardware["displayName"]
-                            if hardware.get("version"):
-                                self._firmware = hardware["version"]
-                            _LOGGER.debug(
-                                "Got init_info: mac=%s, model=%s",
-                                self._mac,
-                                self._model,
-                            )
-                            return
-            except Exception as err:
-                _LOGGER.debug("init_info path %s failed: %s", path, err)
-
-        _LOGGER.debug("Could not fetch init_info, using fallback MAC")
-
-    async def _login(self) -> None:
-        """Authenticate with the router and cache the stok."""
-        session = self._get_session()
-
-        # Try to get MAC from init_info (non-fatal if fails)
-        await self._fetch_init_info_unauth()
-
         nonce = self._generate_nonce()
         password = self._build_login_password(nonce)
 
         login_url = f"{self._base_url}{API_LOGIN}"
-        _LOGGER.debug("Attempting login to %s", login_url)
+        _LOGGER.debug("Attempting login to %s", self._host)
 
         try:
             async with session.post(
@@ -161,7 +139,6 @@ class MiWiFiAPIClient:
                     "nonce": nonce,
                 },
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
-                allow_redirects=False,
             ) as resp:
                 _LOGGER.debug("Login response status: %s", resp.status)
 
@@ -177,7 +154,7 @@ class MiWiFiAPIClient:
                     )
 
                 data = await resp.json(content_type=None)
-                _LOGGER.debug("Login response code: %s", data.get("code"))
+                _LOGGER.debug("Login response: code=%s, msg=%s", data.get("code"), data.get("msg"))
 
         except aiohttp.ClientError as err:
             _LOGGER.error("Cannot connect to router at %s: %s", self._host, err)
@@ -191,10 +168,8 @@ class MiWiFiAPIClient:
         if data.get("code") != 0:
             error_msg = data.get("msg", "Unknown error")
             error_code = data.get("code")
-            _LOGGER.error(
-                "Login failed: code=%s, msg=%s", error_code, error_msg
-            )
-            if "密码错误" in str(error_msg) or error_code == 401:
+            _LOGGER.error("Login failed: code=%s, msg=%s", error_code, error_msg)
+            if "密码错误" in str(error_msg) or "not auth" in str(error_msg) or error_code == 401:
                 raise MiWiFiAuthError(f"Invalid password: {error_msg}")
             raise MiWiFiConnectionError(f"Login failed: {error_msg}")
 
@@ -212,6 +187,53 @@ class MiWiFiAPIClient:
         self._stok_expire = time.time() + STOK_CACHE_SECONDS
         _LOGGER.info("Successfully logged in to MiWiFi router at %s", self._host)
 
+        # After successful login, try to get MAC and model info via status API
+        await self._fetch_router_info_after_login(session)
+
+    async def _fetch_router_info_after_login(self, session: aiohttp.ClientSession) -> None:
+        """After login, fetch router hardware info from status or init_info.
+
+        We try status first since it's more reliable, then init_info as fallback.
+        """
+        # Try getting info from status endpoint (usually has hardware section)
+        try:
+            url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}{API_STATUS}"
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    hardware = data.get("hardware", {})
+                    if hardware:
+                        if hardware.get("displayName"):
+                            self._model = hardware["displayName"]
+                        if hardware.get("version"):
+                            self._firmware = hardware["version"]
+                        if hardware.get("platform"):
+                            pass  # platform is available
+                    _LOGGER.debug("Got router info from status: model=%s, firmware=%s", self._model, self._firmware)
+                    return
+        except Exception as err:
+            _LOGGER.debug("Could not fetch router info from status: %s", err)
+
+        # Fallback: try init_info
+        try:
+            url = f"{self._base_url}/cgi-bin/luci/;stok={self._stok}{API_INIT_INFO}"
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    self._mac = data.get("mac", self._mac)
+                    hardware = data.get("hardware", {})
+                    if hardware.get("displayName"):
+                        self._model = hardware["displayName"]
+                    if hardware.get("version"):
+                        self._firmware = hardware["version"]
+                    _LOGGER.debug("Got router info from init_info: model=%s", self._model)
+        except Exception as err:
+            _LOGGER.debug("Could not fetch router info from init_info: %s", err)
+
     async def _api_get(self, endpoint: str) -> dict[str, Any]:
         """Make an authenticated API GET request."""
         stok = await self._ensure_stok()
@@ -223,7 +245,7 @@ class MiWiFiAPIClient:
                 url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
             ) as resp:
                 if resp.status == 401 or resp.status == 403:
-                    # Stok expired, clear and retry once
+                    # Stok expired, re-login and retry
                     self._stok = None
                     stok = await self._ensure_stok()
                     url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{endpoint}"
@@ -254,11 +276,7 @@ class MiWiFiAPIClient:
     # ---- Public API Methods ----
 
     async def get_status(self) -> dict[str, Any]:
-        """Get realtime router status (speeds, counts, device list with speeds).
-
-        This is the primary endpoint for high-frequency polling.
-        Returns: wan speeds, cpu, mem, device counts, per-device speed data.
-        """
+        """Get realtime router status (speeds, counts, device list with speeds)."""
         data = await self._api_get(API_STATUS)
 
         result: dict[str, Any] = {
@@ -269,7 +287,6 @@ class MiWiFiAPIClient:
             "dev": [],
         }
 
-        # WAN speeds
         wan = data.get("wan", {})
         result["wan"] = {
             "downspeed": int(wan.get("downspeed", 0)),
@@ -278,14 +295,12 @@ class MiWiFiAPIClient:
             "upload": int(wan.get("upload", 0)),
         }
 
-        # Device counts
         count = data.get("count", {})
         result["count"] = {
             "online": int(count.get("online", 0)),
             "all": int(count.get("all", 0)),
         }
 
-        # CPU
         cpu = data.get("cpu", {})
         result["cpu"] = {
             "load": float(cpu.get("load", 0)),
@@ -293,14 +308,12 @@ class MiWiFiAPIClient:
             "hz": cpu.get("hz", "0MHz"),
         }
 
-        # Memory
         mem = data.get("mem", {})
         result["mem"] = {
             "usage": float(mem.get("usage", 0)),
             "total": mem.get("total", "0MB"),
         }
 
-        # Per-device data (with speeds!)
         dev_list = data.get("dev", [])
         devices = []
         for d in dev_list:
@@ -321,7 +334,6 @@ class MiWiFiAPIClient:
             devices.append(device)
         result["dev"] = devices
 
-        # Hardware info (from status response)
         hardware = data.get("hardware", {})
         if hardware:
             result["hardware"] = {
@@ -333,11 +345,7 @@ class MiWiFiAPIClient:
         return result
 
     async def get_device_list(self) -> dict[str, Any]:
-        """Get detailed device list with more per-device information.
-
-        This is a secondary endpoint for medium-frequency polling.
-        Returns more device details than /api/misystem/status.
-        """
+        """Get detailed device list with more per-device information."""
         data = await self._api_get(API_DEVICE_LIST)
 
         result: dict[str, Any] = {
@@ -345,7 +353,6 @@ class MiWiFiAPIClient:
             "count": {},
         }
 
-        # Parse device list - the structure varies by firmware
         raw_devs = data.get("list", data.get("dev", []))
         if isinstance(raw_devs, dict):
             raw_devs = list(raw_devs.values())
@@ -390,9 +397,9 @@ class MiWiFiAPIClient:
         return result
 
     async def get_init_info(self) -> dict[str, Any]:
-        """Get router hardware/firmware info (static, poll infrequently)."""
-        if self._init_info and time.time() < self._init_info_expire:
-            return self._init_info
+        """Get router hardware/firmware info (cached for 5 minutes)."""
+        if self._init_info_cache and time.time() < self._init_info_expire:
+            return self._init_info_cache
 
         data = await self._api_get(API_INIT_INFO)
 
@@ -412,7 +419,7 @@ class MiWiFiAPIClient:
 
         result["mac"] = data.get("mac", "")
 
-        self._init_info = result
+        self._init_info_cache = result
         self._init_info_expire = time.time() + 300
 
         if hardware.get("displayName"):
@@ -426,10 +433,7 @@ class MiWiFiAPIClient:
         """Get extended status with per-band device counts."""
         data = await self._api_get(API_NEWSTATUS)
 
-        result: dict[str, Any] = {
-            "count": {},
-            "band": {},
-        }
+        result: dict[str, Any] = {}
 
         count = data.get("count", {})
         result["count"] = {
@@ -442,10 +446,7 @@ class MiWiFiAPIClient:
         return result
 
     async def test_connection(self) -> bool:
-        """Test if we can connect and authenticate with the router.
-
-        Returns True on success, False on failure. Logs errors for debugging.
-        """
+        """Test if we can connect and authenticate with the router."""
         try:
             await self._login()
             return True
