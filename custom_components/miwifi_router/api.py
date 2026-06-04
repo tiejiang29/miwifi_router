@@ -71,18 +71,26 @@ class MiWiFiAPIClient:
 
     @staticmethod
     def _sha1(text: str) -> str:
-        """SHA1 hash."""
+        """SHA1 hash (legacy firmware)."""
         return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _sha256(text: str) -> str:
+        """SHA256 hash (newer firmware like BE5000 RD18)."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _build_login_password(self, nonce: str) -> str:
         """Build the login password hash.
 
-        Algorithm: sha1(nonce + sha1(password + public_key))
-        This is the standard MiWiFi login algorithm used by all firmware versions.
+        Old firmware (SHA1): sha1(nonce + sha1(password + public_key))
+        New firmware (SHA256): sha256(nonce + sha256(password + public_key))
+
+        We try SHA256 first (newer routers), then SHA1 as fallback.
         The nonce format does NOT need the real MAC - any valid format works.
         """
-        pwd_hash = self._sha1(self._password + PUBLIC_KEY)
-        return self._sha1(nonce + pwd_hash)
+        # Try SHA256 (BE5000 and newer)
+        pwd_hash = self._sha256(self._password + PUBLIC_KEY)
+        return self._sha256(nonce + pwd_hash)
 
     @staticmethod
     def _generate_nonce() -> str:
