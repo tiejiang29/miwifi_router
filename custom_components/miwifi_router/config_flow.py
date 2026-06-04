@@ -58,37 +58,36 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Test connection with hass for non-blocking aiohttp
             api = MiWiFiAPIClient(host, password, hass=self.hass)
             try:
-                success = await api.test_connection()
-                if success:
-                    # Get model info for the entry title
-                    model = api.model
-                    try:
-                        init_info = await api.get_init_info()
-                        display_name = init_info.get("hardware", {}).get(
-                            "displayName", model
-                        )
-                    except Exception:
-                        display_name = model
-
-                    return self.async_create_entry(
-                        title=f"{display_name} ({host})",
-                        data={
-                            CONF_HOST: host,
-                            CONF_PASSWORD: password,
-                        },
-                        options={
-                            CONF_SCAN_INTERVAL: scan_interval,
-                            CONF_DEVICE_SCAN_INTERVAL: device_scan_interval,
-                        },
+                await api.test_connection()
+                # Login succeeded, get model info for the entry title
+                model = api.model
+                try:
+                    init_info = await api.get_init_info()
+                    display_name = init_info.get("hardware", {}).get(
+                        "displayName", model
                     )
-                else:
-                    errors["base"] = "cannot_connect"
-            except MiWiFiAuthError:
+                except Exception:
+                    display_name = model
+
+                return self.async_create_entry(
+                    title=f"{display_name} ({host})",
+                    data={
+                        CONF_HOST: host,
+                        CONF_PASSWORD: password,
+                    },
+                    options={
+                        CONF_SCAN_INTERVAL: scan_interval,
+                        CONF_DEVICE_SCAN_INTERVAL: device_scan_interval,
+                    },
+                )
+            except MiWiFiAuthError as err:
+                _LOGGER.warning("Authentication failed for %s: %s", host, err)
                 errors["base"] = "invalid_auth"
-            except MiWiFiConnectionError:
+            except MiWiFiConnectionError as err:
+                _LOGGER.warning("Connection failed for %s: %s", host, err)
                 errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
+            except Exception as err:
+                _LOGGER.exception("Unexpected exception for %s: %s", host, err)
                 errors["base"] = "unknown"
             finally:
                 await api.close()

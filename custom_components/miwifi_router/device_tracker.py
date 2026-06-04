@@ -23,10 +23,6 @@ from .coordinator import MiWiFiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Grace period: how long a device stays "home" after last seen (seconds)
-# The router's "online" field already tracks this, so we trust it directly.
-OFFLINE_GRACE_SECONDS = 0
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -134,20 +130,22 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
         # Unique ID based on router host + device MAC
         self._attr_unique_id = f"{coordinator.api._host}_device_{mac}"
 
-        # Friendly name
+        # Friendly name - prefer hostname from device_list, then devname
         name = dev_data.get("name", "")
+        if not name or name == mac:
+            # Try hostname field (from xqsystem/device_list)
+            name = dev_data.get("hostname", dev_data.get("name", ""))
         if not name or name == mac:
             name = f"Device {mac}"
         self._attr_name = name
 
         # Initial connection state
-        self._attr_is_connected = int(dev_data.get("online", 0)) > 0
+        online_val = dev_data.get("online", 0)
+        self._attr_is_connected = int(online_val) > 0 if online_val else False
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle coordinator update - data is managed by MiWiFiTrackerManager."""
-        # The tracker manager calls update_data() directly,
-        # so we just need to write the state here.
         self.async_write_ha_state()
 
     @property
@@ -218,6 +216,8 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
             attrs["channel"] = self._dev_data["channel"]
         if "oui" in self._dev_data and self._dev_data["oui"]:
             attrs["oui"] = self._dev_data["oui"]
+        if "hostname" in self._dev_data and self._dev_data["hostname"]:
+            attrs["hostname"] = self._dev_data["hostname"]
 
         return attrs
 
@@ -246,11 +246,15 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
     def update_data(self, dev_data: dict[str, Any]) -> None:
         """Update device data and connection state."""
         self._dev_data = dev_data
-        self._attr_is_connected = int(dev_data.get("online", 0)) > 0
+        online_val = dev_data.get("online", 0)
+        self._attr_is_connected = int(online_val) > 0 if online_val else False
 
         # Update name if we got a more descriptive one
         name = dev_data.get("name", "")
-        if name and name != self._mac and name.strip():
-            self._attr_name = name
+        hostname = dev_data.get("hostname", "")
+        # Prefer hostname from device_list if available
+        preferred_name = hostname if hostname and hostname != self._mac else name
+        if preferred_name and preferred_name != self._mac and preferred_name.strip():
+            self._attr_name = preferred_name
 
         self.async_write_ha_state()

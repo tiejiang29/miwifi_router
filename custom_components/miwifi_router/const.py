@@ -13,13 +13,17 @@ DEFAULT_SCAN_INTERVAL = 10  # seconds - for realtime data (speeds, counts)
 DEFAULT_DEVICE_SCAN_INTERVAL = 30  # seconds - for device list details
 
 # Router API endpoints
+# Login endpoint - does NOT use stok, accessed directly
 API_LOGIN = "/cgi-bin/luci/api/xqsystem/login"
-API_STATUS = "/api/misystem/status"
-API_DEVICE_LIST = "/api/misystem/device_list"
-API_INIT_INFO = "/cgi-bin/luci/api/xqsystem/init_info"
-API_NEWSTATUS = "/api/misystem/newstatus"
-API_WIFI_DETAIL = "/api/misystem/wifi_detail_all"
-API_SYSTEM_STATUS = "/api/misystem/status"
+
+# Authenticated endpoints - accessed via /cgi-bin/luci/;stok=XXX{endpoint}
+# These paths are based on diagnostic results from BE5000 (RD18) firmware 1.0.53
+API_STATUS = "/api/misystem/status"              # Device speeds + WAN stats
+API_DEVICE_LIST = "/api/xqsystem/device_list"    # Detailed device list
+API_INIT_INFO = "/api/xqsystem/init_info"        # Router hardware/firmware info
+API_NEWSTATUS = "/api/misystem/newstatus"        # Extended status with hardware info
+API_WIFI_DETAIL = "/api/xqnetwork/wifi_detail_all"  # WiFi band details
+API_SYSTEM_STATUS = "/api/xqsystem/status"       # System status with WAN statistics
 
 # Stok cache duration (seconds)
 STOK_CACHE_SECONDS = 600  # 10 minutes

@@ -1,4 +1,12 @@
-"""Sensor platform for MiWiFi Router."""
+"""Sensor platform for MiWiFi Router.
+
+Provides sensors for:
+- Download/Upload speed (B/s)
+- Download/Upload total (B)
+- Online device count
+- CPU load (%)
+- Memory usage (%)
+"""
 
 from __future__ import annotations
 
@@ -12,18 +20,15 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_ENTITY_ID,
-    ATTR_UNIT_OF_MEASUREMENT,
     PERCENTAGE,
     UnitOfDataRate,
     UnitOfInformation,
-    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, SENSOR_TYPES
+from .const import DOMAIN
 from .coordinator import MiWiFiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,7 +67,6 @@ async def async_setup_entry(
 
     entities: list[MiWiFiRouterSensor] = []
 
-    # Create sensor entities from SENSOR_TYPES
     descriptions = [
         SensorEntityDescription(
             key="download_speed",
@@ -145,9 +149,7 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self.entity_description = description
         self._model = model
         self._firmware = firmware
-        self._attr_unique_id = (
-            f"{coordinator.api._host}_{description.key}"
-        )
+        self._attr_unique_id = f"{coordinator.api._host}_{description.key}"
         self._attr_extra_state_attributes: dict[str, Any] = {}
 
     @property
@@ -203,24 +205,34 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
             self._attr_native_value = online
             self._attr_extra_state_attributes = {
                 "total_devices": total,
-                "offline_devices": total - online,
+                "offline_devices": max(0, total - online),
             }
 
         elif key == "cpu_load":
-            load = status.get("cpu", {}).get("load", 0)
-            # CPU load is a ratio, convert to percentage
-            self._attr_native_value = round(load * 100, 1)
+            cpu = status.get("cpu", {})
+            load = cpu.get("load", 0)
+            # CPU load is a ratio (0-1), convert to percentage
+            if isinstance(load, (int, float)) and 0 < load <= 1:
+                load = round(load * 100, 1)
+            elif isinstance(load, (int, float)) and load > 1:
+                load = round(load, 1)
+            self._attr_native_value = load
             self._attr_extra_state_attributes = {
-                "cores": status.get("cpu", {}).get("core", 0),
-                "frequency": status.get("cpu", {}).get("hz", ""),
+                "cores": cpu.get("core", 0),
+                "frequency": cpu.get("hz", ""),
             }
 
         elif key == "memory_usage":
-            usage = status.get("mem", {}).get("usage", 0)
-            # Memory usage is already a ratio
-            self._attr_native_value = round(usage * 100, 1)
+            mem = status.get("mem", {})
+            usage = mem.get("usage", 0)
+            # Memory usage is a ratio (0-1), convert to percentage
+            if isinstance(usage, (int, float)) and 0 < usage <= 1:
+                usage = round(usage * 100, 1)
+            elif isinstance(usage, (int, float)) and usage > 1:
+                usage = round(usage, 1)
+            self._attr_native_value = usage
             self._attr_extra_state_attributes = {
-                "total_memory": status.get("mem", {}).get("total", ""),
+                "total_memory": mem.get("total", ""),
             }
 
         self.async_write_ha_state()

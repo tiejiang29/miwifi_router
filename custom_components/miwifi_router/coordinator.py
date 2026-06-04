@@ -1,9 +1,15 @@
-"""DataUpdateCoordinator with layered polling strategy for MiWiFi Router."""
+"""DataUpdateCoordinator with layered polling strategy for MiWiFi Router.
+
+Polling tiers:
+- Tier 1 (realtime): WAN speeds, device counts, per-device speeds — 10s
+- Tier 2 (devices): Full device list with details — 30s
+- Tier 3 (static): Hardware/firmware info — 5 min (cached in API client)
+"""
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -53,8 +59,8 @@ class MiWiFiRouterData:
         """Merge device data from status and device_list endpoints.
 
         Status provides per-device speeds (upspeed/downspeed).
-        Device_list provides more detail (signal, channel, oui, etc).
-        We merge by MAC address.
+        Device_list provides more detail (signal, channel, oui, hostname, etc).
+        We merge by MAC address, preferring the most descriptive name.
         """
         merged: dict[str, dict[str, Any]] = {}
 
@@ -87,16 +93,7 @@ class MiWiFiRouterData:
 
 
 class MiWiFiCoordinator(DataUpdateCoordinator):
-    """Coordinator with layered polling: different intervals for different data tiers.
-
-    Tier 1 (realtime): WAN speeds, device counts, per-device speeds
-        - Poll interval: scan_interval (default 10s)
-    Tier 2 (devices): Full device list with details
-        - Poll interval: device_scan_interval (default 30s)
-        - Also triggered immediately when online count changes
-    Tier 3 (static): Hardware/firmware info
-        - Poll interval: 5 minutes (cached in API client)
-    """
+    """Coordinator with layered polling: different intervals for different data tiers."""
 
     def __init__(
         self,
@@ -133,8 +130,6 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> MiWiFiRouterData:
         """Fetch data from the router using layered polling strategy."""
-        import time
-
         now = time.time()
 
         try:
@@ -144,7 +139,9 @@ class MiWiFiCoordinator(DataUpdateCoordinator):
             # ---- Tier 2: Poll device list at lower frequency ----
             # OR immediately if online count changed (smart trigger)
             count_changed = self._data.has_online_count_changed()
-            device_poll_due = (now - self._last_device_poll) >= self._device_scan_interval
+            device_poll_due = (
+                now - self._last_device_poll
+            ) >= self._device_scan_interval
 
             if device_poll_due or count_changed:
                 if count_changed:
