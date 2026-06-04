@@ -25,9 +25,6 @@ API_NEWSTATUS = "/api/misystem/newstatus"        # Extended status with hardware
 API_WIFI_DETAIL = "/api/xqnetwork/wifi_detail_all"  # WiFi band details
 API_SYSTEM_STATUS = "/api/xqsystem/status"       # System status with WAN statistics
 
-# Stok cache duration (seconds)
-STOK_CACHE_SECONDS = 600  # 10 minutes
-
 # Login algorithm constants
 PUBLIC_KEY = "a2ffa5c9be07488bbb04a3a47d3c5f6a"
 

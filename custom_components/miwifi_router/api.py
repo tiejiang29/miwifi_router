@@ -1,20 +1,20 @@
-"""MiWiFi Router API Client with aiohttp, stok caching, and layered polling.
+"""MiWiFi Router API Client with aiohttp and stok session management.
 
 Key design decisions:
-- Login uses a FRESH aiohttp session (not HA's shared session) to avoid stale
-  cookie interference. HA's shared session may contain expired sysauth cookies
-  that cause the router to reject login with "not auth".
-- Before each login POST, we GET the router's root page first. This triggers
-  the router to clear any stale server-side session state associated with our
-  IP address. Without this step, re-login after stok expiry fails because the
-  router still considers the old session active.
-- All authenticated requests use HA's shared session with stok in the URL.
+- Stok (session token) is kept alive as long as the router accepts it.
+  We do NOT expire the stok locally — the router maintains server-side session
+  state and will return 401 when the session truly expires. Only then do we
+  re-login. This avoids unnecessary login requests and the "not auth" problem
+  caused by stale session conflicts.
+- Login uses a FRESH aiohttp session to avoid stale cookie interference.
+- Before each login POST, we GET the router's root page to clear stale
+  server-side sessions.
+- All authenticated API calls use HA's shared aiohttp session with stok in URL.
 - BE5000 (RD18) uses SHA256+SHA256 for password hashing.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import random
@@ -34,7 +34,6 @@ from .const import (
     API_SYSTEM_STATUS,
     API_WIFI_DETAIL,
     PUBLIC_KEY,
-    STOK_CACHE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,10 +50,12 @@ class MiWiFiConnectionError(Exception):
 
 
 class MiWiFiAPIClient:
-    """API client for MiWiFi router with stok caching.
+    """API client for MiWiFi router with persistent stok session.
 
-    Uses a fresh aiohttp session for login to avoid stale cookie interference,
-    and HA's shared session for all authenticated API calls.
+    Strategy: keep using the stok until the router rejects it (401/403).
+    This leverages the router's server-side session persistence and avoids
+    the "not auth" problem that occurs when re-logging in while the old
+    session is still alive on the router side.
     """
 
     def __init__(self, host: str, password: str, hass=None) -> None:
@@ -62,8 +63,8 @@ class MiWiFiAPIClient:
         self._password = password
         self._base_url = f"http://{host}"
         self._hass = hass
+        # Stok is kept indefinitely until router rejects it
         self._stok: str | None = None
-        self._stok_expire: float = 0
         self._init_info_cache: dict[str, Any] | None = None
         self._init_info_expire: float = 0
         self._mac: str | None = None
@@ -109,11 +110,17 @@ class MiWiFiAPIClient:
         return f"{nonce_type}_{placeholder_mac}_{now}_{rand}"
 
     async def _ensure_stok(self) -> str:
-        """Ensure we have a valid stok, re-login if expired."""
-        if self._stok and time.time() < self._stok_expire:
+        """Ensure we have a stok. Only login if we don't have one yet.
+
+        We do NOT expire the stok locally. The router keeps the server-side
+        session alive, and we keep using the same stok until the router
+        rejects it with 401/403. At that point, _api_get() will clear the
+        stok and call this method again to get a new one.
+        """
+        if self._stok:
             return self._stok
 
-        _LOGGER.debug("Stok expired or missing, logging in to %s", self._host)
+        _LOGGER.debug("No stok available, logging in to %s", self._host)
         await self._login()
         return self._stok  # type: ignore[return-value]
 
@@ -124,10 +131,12 @@ class MiWiFiAPIClient:
         1. Create a fresh aiohttp session (no stale cookies)
         2. GET the router's root page first - this triggers the router to
            clear any stale server-side session associated with our IP.
-           Without this, re-login fails because the router still considers
-           the old session active and returns "not auth".
         3. POST the login data with SHA256+SHA256 hashed password
         4. Extract stok from response
+
+        The stok is kept indefinitely (no local expiry). The router
+        maintains the session server-side. When the router eventually
+        invalidates it, we'll get a 401 and re-login then.
         """
         nonce = self._generate_nonce()
         password = self._build_login_password(nonce)
@@ -144,9 +153,6 @@ class MiWiFiAPIClient:
             connector=aiohttp.TCPConnector(force_close=True),
         ) as login_session:
             # Step 1: GET root page to clear stale server-side session
-            # This is critical for re-login after stok expiry.
-            # The router associates sessions with client IP, and without
-            # this step, it rejects new login attempts with "not auth".
             try:
                 async with login_session.get(
                     self._base_url,
@@ -189,11 +195,9 @@ class MiWiFiAPIClient:
 
                     data = await resp.json(content_type=None)
                     _LOGGER.debug(
-                        "Login response: code=%s, msg=%s, has_url=%s, has_token=%s",
+                        "Login response: code=%s, msg=%s",
                         data.get("code"),
                         data.get("msg"),
-                        "url" in data,
-                        "token" in data,
                     )
 
             except aiohttp.ClientError as err:
@@ -233,22 +237,16 @@ class MiWiFiAPIClient:
             _LOGGER.error("Could not extract stok from login response: %s", data)
             raise MiWiFiConnectionError("Could not extract stok from login response")
 
-        self._stok_expire = time.time() + STOK_CACHE_SECONDS
         _LOGGER.info(
-            "Successfully logged in to MiWiFi router at %s (stok expires in %ds)",
-            self._host, STOK_CACHE_SECONDS,
+            "Successfully logged in to MiWiFi router at %s (stok will be reused until router rejects it)",
+            self._host,
         )
 
         # After successful login, try to get router info
         await self._fetch_router_info_after_login()
 
     async def _fetch_router_info_after_login(self) -> None:
-        """After login, fetch router hardware info from available endpoints.
-
-        Tries newstatus first (has hardware section with model/firmware),
-        then init_info as fallback.
-        Uses HA's shared session with stok in URL.
-        """
+        """After login, fetch router hardware info from available endpoints."""
         session = self._get_session()
 
         # Try newstatus endpoint first - it has hardware info
@@ -298,20 +296,25 @@ class MiWiFiAPIClient:
             _LOGGER.debug("Could not fetch router info from init_info: %s", err)
 
     async def _api_get(self, endpoint: str) -> dict[str, Any]:
-        """Make an authenticated API GET request using stok in URL."""
+        """Make an authenticated API GET request using stok in URL.
+
+        If the router rejects the request with 401/403 (stok expired),
+        we clear the stok, re-login, and retry the request once.
+        """
         stok = await self._ensure_stok()
         session = self._get_session()
         url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{endpoint}"
-
-        _LOGGER.debug("API GET: %s", endpoint)
 
         try:
             async with session.get(
                 url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
             ) as resp:
                 if resp.status == 401 or resp.status == 403:
-                    # Stok expired, re-login and retry
-                    _LOGGER.debug("Got %s, re-authenticating", resp.status)
+                    # Stok rejected by router - re-login and retry
+                    _LOGGER.info(
+                        "Stok rejected (status %s) for %s, re-authenticating",
+                        resp.status, endpoint,
+                    )
                     self._stok = None
                     stok = await self._ensure_stok()
                     url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{endpoint}"
@@ -344,12 +347,33 @@ class MiWiFiAPIClient:
             self._stok = None
             raise MiWiFiConnectionError(f"API request failed: {err}") from err
 
-        # Check for auth errors in response body
+        # Check for auth errors in response body (some endpoints return 200
+        # but with code=401 in the JSON body)
         if isinstance(data, dict):
             code = data.get("code")
             if code == 401:
+                _LOGGER.info(
+                    "Stok expired (code 401 in body) for %s, re-authenticating",
+                    endpoint,
+                )
                 self._stok = None
-                raise MiWiFiAuthError("Stok expired, re-authentication needed")
+                stok = await self._ensure_stok()
+                url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{endpoint}"
+                try:
+                    async with session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                    ) as resp_retry:
+                        if resp_retry.status != 200:
+                            raise MiWiFiConnectionError(
+                                f"API retry failed: {endpoint} returned status {resp_retry.status}"
+                            )
+                        data = await resp_retry.json(content_type=None)
+                except aiohttp.ClientError as err:
+                    self._stok = None
+                    raise MiWiFiConnectionError(
+                        f"API retry failed: {err}"
+                    ) from err
 
         return data
 
@@ -358,8 +382,7 @@ class MiWiFiAPIClient:
     async def get_status(self) -> dict[str, Any]:
         """Get realtime router status (speeds, counts, device list with speeds).
 
-        Combines data from /api/misystem/status and /api/xqsystem/status
-        to get a complete picture on BE5000 (RD18).
+        Combines data from /api/misystem/status and /api/xqsystem/status.
         """
         data = await self._api_get(API_STATUS)
 
@@ -388,7 +411,6 @@ class MiWiFiAPIClient:
                 "all": int(count.get("all", 0)),
             }
         elif isinstance(count, (int, str)):
-            # Some firmware versions return count as a number
             result["count"] = {"online": int(count), "all": int(count)}
 
         # Extract CPU data
@@ -441,7 +463,6 @@ class MiWiFiAPIClient:
                         "download": int(wan_stats.get("download", 0)),
                         "upload": int(wan_stats.get("upload", 0)),
                     }
-                # Also get count from system status if missing
                 if not result["count"].get("online"):
                     sys_count = sys_data.get("count", 0)
                     if isinstance(sys_count, (int, str)):
@@ -464,11 +485,7 @@ class MiWiFiAPIClient:
         return result
 
     async def get_device_list(self) -> dict[str, Any]:
-        """Get detailed device list with more per-device information.
-
-        Uses /api/xqsystem/device_list which provides detailed device info
-        including hostname, signal, channel, OUI, etc.
-        """
+        """Get detailed device list with more per-device information."""
         data = await self._api_get(API_DEVICE_LIST)
 
         result: dict[str, Any] = {
@@ -476,7 +493,6 @@ class MiWiFiAPIClient:
             "count": {},
         }
 
-        # Device list from xqsystem has structure: {"mac": "...", "list": [...]}
         raw_devs = data.get("list", data.get("dev", []))
         if isinstance(raw_devs, dict):
             raw_devs = list(raw_devs.values())
@@ -515,7 +531,6 @@ class MiWiFiAPIClient:
             devices.append(device)
         result["dev"] = devices
 
-        # Count from device_list response
         count = data.get("count", {})
         if isinstance(count, dict):
             result["count"] = {
@@ -523,7 +538,6 @@ class MiWiFiAPIClient:
                 "all": int(count.get("all", 0)),
             }
 
-        # Also store the router's own MAC from the response
         if data.get("mac"):
             result["router_mac"] = data["mac"]
 
@@ -601,7 +615,6 @@ class MiWiFiAPIClient:
         """Test if we can connect and authenticate with the router.
 
         Returns True on success, raises exceptions on failure.
-        This allows the config flow to distinguish between auth and connection errors.
         """
         await self._login()
         return True
