@@ -3,33 +3,40 @@
     "step": {
       "user": {
         "title": "MiWiFi Router",
-        "description": "Set up your Xiaomi MiWiFi router integration.",
+        "description": "设置小米 MiWiFi 路由器集成。",
         "data": {
-          "host": "Router IP Address",
-          "password": "Router Admin Password",
-          "scan_interval": "Scan Interval (seconds, default: 10)",
-          "device_scan_interval": "Device List Scan Interval (seconds, default: 30)"
+          "host": "路由器 IP 地址",
+          "password": "路由器管理密码",
+          "scan_interval": "实时数据轮询间隔（秒，默认 10）",
+          "device_scan_interval": "设备列表轮询间隔（秒，默认 30）"
+        }
+      },
+      "devices": {
+        "title": "选择需添加传感器的设备",
+        "description": "为选中的设备创建独立的速度和流量传感器。如不需要可跳过，之后在配置中添加。",
+        "data": {
+          "tracked_devices": "需添加传感器的设备"
         }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to the router",
-      "invalid_auth": "Invalid password",
-      "unknown": "Unexpected error occurred"
+      "cannot_connect": "无法连接到路由器",
+      "invalid_auth": "密码错误",
+      "unknown": "发生未知错误"
     },
     "abort": {
-      "already_configured": "This router is already configured"
+      "already_configured": "该路由器已配置"
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "MiWiFi Router Options",
-        "description": "Adjust polling intervals and select devices to create per-device sensors.",
+        "title": "MiWiFi Router 配置",
+        "description": "调整轮询间隔，选择需添加传感器的设备。",
         "data": {
-          "scan_interval": "Realtime Data Scan Interval (seconds)",
-          "device_scan_interval": "Device List Scan Interval (seconds)",
-          "tracked_devices": "Tracked Devices (sensors will be created for selected devices)"
+          "scan_interval": "实时数据轮询间隔（秒）",
+          "device_scan_interval": "设备列表轮询间隔（秒）",
+          "tracked_devices": "需添加传感器的设备"
         }
       }
     }

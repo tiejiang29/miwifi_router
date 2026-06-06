@@ -31,6 +31,15 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     MINOR_VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialize config flow."""
+        self._host: str = ""
+        self._password: str = ""
+        self._scan_interval: int = DEFAULT_SCAN_INTERVAL
+        self._device_scan_interval: int = DEFAULT_DEVICE_SCAN_INTERVAL
+        self._device_names: dict[str, str] = {}
+        self._device_options: dict[str, str] = {}
+
     @staticmethod
     @callback
     def async_get_options_flow(
@@ -60,31 +69,43 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Test connection with hass for non-blocking aiohttp
             api = MiWiFiAPIClient(host, password, hass=self.hass)
             try:
-                # test_connection() now handles logout automatically after
-                # a successful login, so the router session is cleaned up
-                # before the integration starts its own session
                 await api.test_connection()
-                # Login succeeded, get model info for the entry title
-                model = api.model
-                try:
-                    init_info = await api.get_init_info()
-                    display_name = init_info.get("hardware", {}).get(
-                        "displayName", model
-                    )
-                except Exception:
-                    display_name = model
 
-                return self.async_create_entry(
-                    title=f"{display_name} ({host})",
-                    data={
-                        CONF_HOST: host,
-                        CONF_PASSWORD: password,
-                    },
-                    options={
-                        CONF_SCAN_INTERVAL: scan_interval,
-                        CONF_DEVICE_SCAN_INTERVAL: device_scan_interval,
-                    },
-                )
+                # Store for next step
+                self._host = host
+                self._password = password
+                self._scan_interval = scan_interval
+                self._device_scan_interval = device_scan_interval
+
+                # Fetch device list for device selection step
+                try:
+                    device_list = await api.get_device_list()
+                    self._device_options = {}
+                    self._device_names = {}
+                    for dev in device_list.get("dev", []):
+                        mac = dev.get("mac", "")
+                        if not mac:
+                            continue
+                        name = (
+                            dev.get("hostname", "")
+                            or dev.get("name", "")
+                            or mac
+                        )
+                        if not name or name.upper() == mac.upper():
+                            name = f"Device {mac}"
+                        display = f"{name} ({mac})"
+                        self._device_options[mac] = display
+                        self._device_names[mac] = name
+                except Exception:
+                    _LOGGER.debug("Failed to fetch device list during setup")
+
+                # Go to device selection step (or skip if no devices found)
+                if self._device_options:
+                    return await self.async_step_devices()
+
+                # No devices found, create entry directly
+                return self._create_entry_with_tracked({})
+
             except MiWiFiAuthError as err:
                 _LOGGER.warning("Authentication failed for %s: %s", host, err)
                 errors["base"] = "invalid_auth"
@@ -115,6 +136,48 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=schema,
             errors=errors,
+        )
+
+    async def async_step_devices(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle device selection step."""
+        if user_input is not None:
+            selected_macs: list[str] = list(
+                user_input.get(CONF_TRACKED_DEVICES, [])
+            )
+            tracked_devices: dict[str, str] = {}
+            for mac in selected_macs:
+                tracked_devices[mac] = self._device_names.get(mac, mac)
+            return self._create_entry_with_tracked(tracked_devices)
+
+        schema = vol.Schema({
+            vol.Optional(CONF_TRACKED_DEVICES, default=[]): cv.multi_select(
+                self._device_options
+            ),
+        })
+
+        return self.async_show_form(step_id="devices", data_schema=schema)
+
+    def _create_entry_with_tracked(
+        self, tracked_devices: dict[str, str]
+    ) -> FlowResult:
+        """Create the config entry with tracked devices."""
+        # Get display name
+        api_display = self._host
+        # We can't easily get model here without another API call,
+        # so use host as fallback
+        return self.async_create_entry(
+            title=f"MiWiFi Router ({self._host})",
+            data={
+                CONF_HOST: self._host,
+                CONF_PASSWORD: self._password,
+            },
+            options={
+                CONF_SCAN_INTERVAL: self._scan_interval,
+                CONF_DEVICE_SCAN_INTERVAL: self._device_scan_interval,
+                CONF_TRACKED_DEVICES: tracked_devices,
+            },
         )
 
 
