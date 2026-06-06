@@ -25,10 +25,11 @@
     "step": {
       "init": {
         "title": "MiWiFi Router Options",
-        "description": "Adjust polling intervals and settings.",
+        "description": "Adjust polling intervals and select devices to create per-device sensors.",
         "data": {
           "scan_interval": "Realtime Data Scan Interval (seconds)",
-          "device_scan_interval": "Device List Scan Interval (seconds)"
+          "device_scan_interval": "Device List Scan Interval (seconds)",
+          "tracked_devices": "Tracked Devices (sensors will be created for selected devices)"
         }
       }
     }

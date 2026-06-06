@@ -12,6 +12,9 @@ CONF_DEVICE_SCAN_INTERVAL = "device_scan_interval"
 DEFAULT_SCAN_INTERVAL = 10  # seconds - for realtime data (speeds, counts)
 DEFAULT_DEVICE_SCAN_INTERVAL = 30  # seconds - for device list details
 
+# Per-device sensor configuration
+CONF_TRACKED_DEVICES = "tracked_devices"  # dict: {mac: device_name}
+
 # Router API endpoints
 # Login endpoint - does NOT use stok, accessed directly
 API_LOGIN = "/cgi-bin/luci/api/xqsystem/login"

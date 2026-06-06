@@ -11,10 +11,12 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_SCAN_INTERVAL
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import config_validation as cv
 
 from .api import MiWiFiAPIClient, MiWiFiAuthError, MiWiFiConnectionError
 from .const import (
     CONF_DEVICE_SCAN_INTERVAL,
+    CONF_TRACKED_DEVICES,
     DEFAULT_DEVICE_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -122,29 +124,89 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
         self._config_entry = config_entry
+        self._device_names: dict[str, str] = {}
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Manage the options."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # Build tracked devices dict from multi-select results
+            selected_macs: list[str] = list(
+                user_input.get(CONF_TRACKED_DEVICES, [])
+            )
+            tracked_devices: dict[str, str] = {}
+            for mac in selected_macs:
+                tracked_devices[mac] = self._device_names.get(mac, mac)
 
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_SCAN_INTERVAL,
-                    default=self._config_entry.options.get(
-                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
-                    ),
-                ): int,
-                vol.Optional(
-                    CONF_DEVICE_SCAN_INTERVAL,
-                    default=self._config_entry.options.get(
-                        CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
-                    ),
-                ): int,
+            data = {
+                CONF_SCAN_INTERVAL: user_input.get(
+                    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                ),
+                CONF_DEVICE_SCAN_INTERVAL: user_input.get(
+                    CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
+                ),
+                CONF_TRACKED_DEVICES: tracked_devices,
             }
+            return self.async_create_entry(title="", data=data)
+
+        # Build device multi-select options from coordinator data
+        device_options: dict[str, str] = {}
+        self._device_names = {}
+
+        coordinator = self.hass.data.get(DOMAIN, {}).get(
+            self._config_entry.entry_id
         )
+        if coordinator and coordinator.router_data.devices:
+            for mac, dev_data in coordinator.router_data.devices.items():
+                name = (
+                    dev_data.get("hostname", "")
+                    or dev_data.get("name", "")
+                    or mac
+                )
+                if not name or name.upper() == mac.upper():
+                    name = f"Device {mac}"
+                display = f"{name} ({mac})"
+                device_options[mac] = display
+                self._device_names[mac] = name
+
+        # Include previously tracked devices that may be offline now
+        prev_tracked = self._config_entry.options.get(CONF_TRACKED_DEVICES, {})
+        if isinstance(prev_tracked, dict):
+            for mac, name in prev_tracked.items():
+                if mac not in device_options:
+                    display = f"{name} ({mac}) [离线]"
+                    device_options[mac] = display
+                    self._device_names[mac] = name
+
+        # Default selection = previously tracked devices
+        default_selected: list[str] = (
+            list(prev_tracked.keys()) if isinstance(prev_tracked, dict) else []
+        )
+
+        # Build schema with or without device selection
+        schema_dict: dict[Any, Any] = {
+            vol.Optional(
+                CONF_SCAN_INTERVAL,
+                default=self._config_entry.options.get(
+                    CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                ),
+            ): int,
+            vol.Optional(
+                CONF_DEVICE_SCAN_INTERVAL,
+                default=self._config_entry.options.get(
+                    CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
+                ),
+            ): int,
+        }
+
+        if device_options:
+            schema_dict[
+                vol.Optional(
+                    CONF_TRACKED_DEVICES, default=default_selected
+                )
+            ] = cv.multi_select(device_options)
+
+        schema = vol.Schema(schema_dict)
 
         return self.async_show_form(step_id="init", data_schema=schema)
