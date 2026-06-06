@@ -68,16 +68,19 @@
 | 型号 | 平台 | 状态 |
 |------|------|------|
 | Xiaomi BE5000 | RD18 | ✅ 已验证 |
-| Xiaomi BE3600 | RD09 | ✅ 兼容 |
-| Xiaomi AX9000 | RA69 | ✅ 兼容 |
-| Xiaomi AX6000 | RA67 | ✅ 兼容 |
-| Xiaomi AX3600 | RA70 | ✅ 兼容 |
-| Xiaomi AX3000T | RB01 | ✅ 兼容 |
-| Redmi AX6 | RA69 | ✅ 兼容 |
-| Redmi AX5 | RB03 | ✅ 兼容 |
-| Redmi AC2100 | RM2100 | ✅ 兼容 |
+| Xiaomi BE3600 | RD09 | 🔶 理论兼容 |
+| Xiaomi AX9000 | RA69 | 🔶 理论兼容 |
+| Xiaomi AX6000 | RA67 | 🔶 理论兼容 |
+| Xiaomi AX3600 | RA70 | 🔶 理论兼容 |
+| Xiaomi AX3000T | RB01 | 🔶 理论兼容 |
+| Redmi AX6 | RA69 | 🔶 理论兼容 |
+| Redmi AX5 | RB03 | 🔶 理论兼容 |
+| Redmi AC2100 | RM2100 | 🔶 理论兼容 |
 
-> 其他 MiWiFi 固件路由器理论上均兼容，欢迎反馈测试结果。
+> - ✅ **已验证**：经实际设备测试确认可用
+> - 🔶 **理论兼容**：基于相同 MiWiFi 固件 API 推断兼容，未经实际设备验证
+>
+> 其他运行 MiWiFi 固件的路由器理论上均兼容，欢迎反馈测试结果，验证后将升级为 ✅。
 
 ## 📥 安装
 
