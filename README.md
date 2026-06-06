@@ -30,6 +30,28 @@
   - `max_upload_speed` / `max_download_speed`：峰值速率
 - 信号强度、频道、OUI 等额外信息
 
+### 📶 设备传感器 (Per-Device Sensor)
+
+> 🆕 v1.3.0 新增
+
+在集成配置中手动选择需要监控的设备，为每个选中设备自动创建 **4 个独立传感器**：
+
+| 传感器 | 说明 | 单位 |
+|--------|------|------|
+| {设备名} Download Speed | 设备下载速率 | B/s |
+| {设备名} Upload Speed | 设备上传速率 | B/s |
+| {设备名} Download Total | 设备累计下载量 | B |
+| {设备名} Upload Total | 设备累计上传量 | B |
+
+**与 device_tracker 的区别**：
+- `device_tracker` 的速率数据是属性（attribute），**不记录历史**，无法在图表中展示
+- `device_sensor` 是独立传感器实体，**支持历史记录**，可直接用于 mini-graph-card 等图表卡片
+
+**特性**：
+- 新建条目时可选择设备，也可跳过稍后配置
+- 已离线但之前选中的设备标注 `[离线]`，方便重新选中
+- 取消勾选的设备，其传感器实体在重载后自动清理
+
 ### ⚡ 性能优化
 
 | 优化策略 | 说明 | 效果 |
@@ -79,21 +101,42 @@ cp -r custom_components/miwifi_router /config/custom_components/
 
 ## ⚙️ 配置
 
+### 新建条目
+
 通过 UI 配置流程完成，**无需编辑 YAML**：
 
 1. 进入 **设置 → 设备与服务 → 添加集成**
 2. 搜索 "MiWiFi Router"
-3. 填写：
+3. 填写连接信息：
    - **路由器 IP 地址**：默认 `192.168.31.1`
    - **路由器管理密码**：MiWiFi 管理界面登录密码
    - **实时数据轮询间隔**：默认 10 秒
    - **设备列表轮询间隔**：默认 30 秒
+4. 连接成功后，进入 **选择需添加传感器的设备** 步骤：
+   - 勾选需要监控的设备（可跳过，稍后添加）
+   - 每个选中设备将创建 4 个独立传感器
+5. 提交完成
 
 ### 修改配置
 
-安装后通过 **设置 → 设备与服务 → MiWiFi Router → ⚙️ 配置** 修改轮询间隔。
+1. 进入 **设置 → 设备与服务 → MiWiFi Router → ⚙️ 配置**
+2. 在 **需添加传感器的设备** 下拉框中勾选/取消设备
+3. 提交后集成自动重载，传感器立即生效
 
 ## 📖 使用示例
+
+### 设备速率图表
+
+使用 mini-graph-card 展示设备实时速率：
+
+```yaml
+type: custom:mini-graph-card
+entities:
+  - sensor.xiaomizhu_lu_you_qi_istoreos_download_speed
+  - sensor.xiaomizhu_lu_you_qi_istoreos_upload_speed
+name: istoreos 网速
+hours_to_show: 1
+```
 
 ### 自动化：设备上线通知
 
@@ -129,7 +172,7 @@ automation:
           message: "{{ trigger.from_state.attributes.friendly_name }} 已断开WiFi超过5分钟"
 ```
 
-### 查看设备速率
+### 查看设备速率（device_tracker 属性）
 
 ```yaml
 # 在模板中使用
@@ -154,18 +197,21 @@ automation:
 ### Q: 会影响路由器性能吗？
 不会。HTTP Keep-Alive 复用连接，分层轮询减少请求量。路由器管理界面每 2 秒轮询，本集成默认 10 秒，负载远低于网页管理。
 
+### Q: device_tracker 的速率数据和设备传感器有什么区别？
+`device_tracker` 的速率是属性（attribute），HA 不记录属性历史，无法直接画图。设备传感器是独立实体，支持历史记录，可直接用于图表。如果需要在仪表盘中展示设备速率曲线，请选中对应设备创建传感器。
+
 ## 📁 文件结构
 
 ```
 custom_components/miwifi_router/
 ├── __init__.py          # 集成入口
 ├── api.py               # 路由器 API 客户端（登录、stok缓存、Keep-Alive）
-├── config_flow.py       # UI 配置流程
+├── config_flow.py       # UI 配置流程（含设备选择步骤）
 ├── const.py             # 常量定义
 ├── coordinator.py       # 数据更新协调器（分层轮询策略）
-├── device_tracker.py    # 设备追踪平台（在线检测+单设备速率）
+├── device_tracker.py    # 设备追踪平台（在线检测+单设备速率属性）
 ├── manifest.json        # 集成清单
-├── sensor.py            # 传感器平台
+├── sensor.py            # 传感器平台（路由器+可选设备传感器）
 └── strings.json         # 配置流程翻译
 ```
 

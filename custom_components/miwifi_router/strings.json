@@ -31,8 +31,8 @@
   "options": {
     "step": {
       "init": {
-        "title": "MiWiFi Router 配置",
-        "description": "调整轮询间隔，选择需添加传感器的设备。",
+        "title": "选择需添加传感器的设备",
+        "description": "调整轮询间隔，选择需添加传感器的设备。取消勾选的设备，其传感器会在重载后自动删除。",
         "data": {
           "scan_interval": "实时数据轮询间隔（秒）",
           "device_scan_interval": "设备列表轮询间隔（秒）",
