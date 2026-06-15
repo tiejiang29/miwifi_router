@@ -112,18 +112,33 @@ class MiWiFiAPIClient:
         self._hash_algo_name: str = "SHA256"
         self._hash_algo = hashlib.sha256
         self._hash_algo_detected: bool = False  # True once detected via init_info or successful login
+        self._hash_algos_tried: set[str] = set()  # Track which algorithms have been tried
 
-    def _try_next_hash_algo(self) -> bool:
-        """Switch to the next hash algorithm. Returns True if switched, False if no more."""
-        current_idx = next(
-            i for i, (name, _) in enumerate(self._HASH_ALGORITHMS)
-            if name == self._hash_algo_name
-        )
-        next_idx = current_idx + 1
-        if next_idx < len(self._HASH_ALGORITHMS):
-            self._hash_algo_name, self._hash_algo = self._HASH_ALGORITHMS[next_idx]
-            return True
-        return False
+    def _switch_hash_algo(self) -> bool:
+        """Switch to the OTHER hash algorithm (SHA256<->SHA1).
+
+        Unlike a sequential "next", this always switches to the alternative
+        algorithm regardless of current position. This handles the case where
+        init_info detected SHA1 but login still fails — we should try SHA256
+        as fallback, not give up.
+
+        Returns True if switched, False if both algorithms have been tried.
+        """
+        self._hash_algos_tried.add(self._hash_algo_name)
+
+        # Find an algorithm we haven't tried yet
+        for name, algo in self._HASH_ALGORITHMS:
+            if name not in self._hash_algos_tried:
+                old_name = self._hash_algo_name
+                self._hash_algo_name = name
+                self._hash_algo = algo
+                _LOGGER.info(
+                    "Switching hash algorithm from %s to %s for %s",
+                    old_name, name, self._host,
+                )
+                return True
+
+        return False  # All algorithms tried
 
     @staticmethod
     def _hash(text: str, algo) -> str:
@@ -275,6 +290,9 @@ class MiWiFiAPIClient:
         # Step 1: Try to detect hash algorithm from init_info
         await self._detect_hash_algo_from_init_info()
 
+        # Reset tried algorithms tracker for this login attempt
+        self._hash_algos_tried = {self._hash_algo_name}
+
         # On first login, clear any stale session from previous runs
         if self._is_first_login:
             _LOGGER.debug("First login for %s, clearing stale session", self._host)
@@ -294,18 +312,11 @@ class MiWiFiAPIClient:
             error_msg = data.get("msg", "Unknown error")
             error_code = data.get("code")
 
-            # "密码错误" is a real wrong password - don't retry
-            # But first try switching hash algorithm if we haven't tried all
+            # "密码错误" means wrong hash algorithm or wrong password
+            # Try the other hash algorithm before giving up
             if "密码错误" in str(error_msg):
-                # Try next hash algorithm before giving up
-                switched = self._try_next_hash_algo()
+                switched = self._switch_hash_algo()
                 if switched:
-                    _LOGGER.info(
-                        "Login failed with %s, retrying with %s for %s",
-                        self._hash_algo_name,
-                        self._hash_algo_name,
-                        self._host,
-                    )
                     continue
                 _LOGGER.error(
                     "Login failed for %s: wrong password with all hash algorithms (code=%s)",
