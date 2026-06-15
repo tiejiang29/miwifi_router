@@ -41,7 +41,7 @@ _LOGGER = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
 DEFAULT_CALL_DELAY = 1  # seconds to wait after logout before re-login
-MAX_LOGIN_RETRIES = 3
+MAX_LOGIN_RETRIES = 4  # 2 per hash algorithm (SHA256 + SHA1 fallback)
 
 
 class MiWiFiAuthError(Exception):
@@ -76,6 +76,7 @@ class MiWiFiAPIClient:
         self._mac: str | None = None
         self._model: str | None = None
         self._firmware: str | None = None
+        self.__init_hash_algo()
 
     def _get_session(self) -> aiohttp.ClientSession:
         """Get HA's shared aiohttp client session for authenticated requests."""
@@ -93,19 +94,44 @@ class MiWiFiAPIClient:
 
     # ---- Authentication ----
 
+    # Hash algorithm combos to try: (name, inner_func, outer_func)
+    # Newer firmware (BE5000 etc.) uses SHA256+SHA256
+    # Older firmware (AX3600, AC2100 etc.) uses SHA1+SHA1
+    _HASH_ALGORITHMS = [
+        ("SHA256", hashlib.sha256),
+        ("SHA1", hashlib.sha1),
+    ]
+
+    def __init_hash_algo(self) -> None:
+        """Initialize hash algorithm. Try SHA256 first, fallback to SHA1."""
+        self._hash_algo_name: str = "SHA256"
+        self._hash_algo = hashlib.sha256
+
+    def _try_next_hash_algo(self) -> bool:
+        """Switch to the next hash algorithm. Returns True if switched, False if no more."""
+        current_idx = next(
+            i for i, (name, _) in enumerate(self._HASH_ALGORITHMS)
+            if name == self._hash_algo_name
+        )
+        next_idx = current_idx + 1
+        if next_idx < len(self._HASH_ALGORITHMS):
+            self._hash_algo_name, self._hash_algo = self._HASH_ALGORITHMS[next_idx]
+            return True
+        return False
+
     @staticmethod
-    def _sha256(text: str) -> str:
-        """SHA256 hash (BE5000 RD18 and newer firmware)."""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    def _hash(text: str, algo) -> str:
+        """Hash text using the specified algorithm."""
+        return algo(text.encode("utf-8")).hexdigest()
 
     def _build_login_password(self, nonce: str) -> str:
-        """Build the login password hash using SHA256+SHA256.
+        """Build the login password hash.
 
-        Algorithm: sha256(nonce + sha256(password + public_key))
-        This is confirmed working on BE5000 (RD18) firmware 1.0.53.
+        Algorithm: hash(nonce + hash(password + public_key))
+        Newer routers use SHA256, older routers use SHA1.
         """
-        inner_hash = self._sha256(self._password + PUBLIC_KEY)
-        return self._sha256(nonce + inner_hash)
+        inner_hash = self._hash(self._password + PUBLIC_KEY, self._hash_algo)
+        return self._hash(nonce + inner_hash, self._hash_algo)
 
     @staticmethod
     def _generate_nonce() -> str:
@@ -204,9 +230,20 @@ class MiWiFiAPIClient:
             error_code = data.get("code")
 
             # "密码错误" is a real wrong password - don't retry
+            # But first try switching hash algorithm if we haven't tried all
             if "密码错误" in str(error_msg):
+                # Try next hash algorithm before giving up
+                switched = self._try_next_hash_algo()
+                if switched:
+                    _LOGGER.info(
+                        "Login failed with %s, retrying with %s for %s",
+                        self._hash_algo_name,
+                        self._hash_algo_name,
+                        self._host,
+                    )
+                    continue
                 _LOGGER.error(
-                    "Login failed for %s: wrong password (code=%s)",
+                    "Login failed for %s: wrong password with all hash algorithms (code=%s)",
                     self._host, error_code,
                 )
                 raise MiWiFiAuthError(f"Invalid password: {error_msg}")
@@ -251,8 +288,8 @@ class MiWiFiAPIClient:
 
         _LOGGER.info(
             "Successfully logged in to MiWiFi router at %s "
-            "(stok will be reused until router rejects it)",
-            self._host,
+            "using %s (stok will be reused until router rejects it)",
+            self._host, self._hash_algo_name,
         )
 
         # After successful login, try to get router info
@@ -529,7 +566,6 @@ class MiWiFiAPIClient:
             device = {
                 "mac": d.get("mac", "").upper(),
                 "name": d.get("devname", d.get("mac", "")),
-                "hostname": d.get("hostname", ""),
                 "online": int(d.get("online", 0)),
                 "upspeed": int(d.get("upspeed", 0)),
                 "downspeed": int(d.get("downspeed", 0)),
@@ -607,7 +643,6 @@ class MiWiFiAPIClient:
                     "devname",
                     d.get("name", d.get("hostname", d.get("mac", ""))),
                 ),
-                "hostname": d.get("hostname", ""),
                 "online": int(d.get("online", 0)) if d.get("online") else 0,
                 "upspeed": int(d.get("upspeed", 0)) if d.get("upspeed") else 0,
                 "downspeed": int(d.get("downspeed", 0)) if d.get("downspeed") else 0,

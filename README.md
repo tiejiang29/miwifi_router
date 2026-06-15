@@ -82,6 +82,36 @@
 >
 > 其他运行 MiWiFi 固件的路由器理论上均兼容，欢迎反馈测试结果，验证后将升级为 ✅。
 
+### 如何判断我的路由器是否支持？
+
+**第一步：登录路由器管理页面**
+
+浏览器打开 `http://192.168.31.1`（改成你的路由器 IP），输入管理密码登录。
+
+登录成功后，看浏览器地址栏，URL 会变成类似这样：
+
+```
+http://192.168.31.1/cgi-bin/luci/;stok=abcdef1234567890/web/home
+```
+
+其中 `stok=` 后面那串字符就是你的 token。
+
+**第二步：访问 init_info 接口**
+
+把地址栏 URL 最后的 `/web/home` 改成 `/api/xqsystem/init_info`，回车访问：
+
+```
+http://192.168.31.1/cgi-bin/luci/;stok=abcdef1234567890/api/xqsystem/init_info
+```
+
+如果页面显示 JSON 数据，能看到路由器型号，就说明完全支持：
+
+```json
+{"hardware":{"platform":"RD18","version":"1.0.53","displayName":"Xiaomi BE5000"},...}
+```
+
+如果登录失败或页面报错，说明路由器不支持。
+
 ## 📥 安装
 
 ### 方法 1：HACS（推荐）
