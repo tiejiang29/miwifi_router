@@ -52,6 +52,19 @@
 - 已离线但之前选中的设备标注 `[离线]`，方便重新选中
 - 取消勾选的设备，其传感器实体在重载后自动清理
 
+### 🔐 加密算法自动检测
+
+> 🆕 v1.3.5 新增
+
+MiWiFi 路由器登录密码的哈希算法因固件版本不同而异：
+- **新固件**（如 BE5000）：使用 SHA256+SHA256
+- **老固件**（如 AX3600、AC2100、AX9000）：使用 SHA1+SHA1
+
+本集成在登录前自动读取路由器 `init_info` 接口中的 `newEncryptMode` 字段判断加密方式，无需用户手动选择：
+- `newEncryptMode=1` → 自动使用 SHA256
+- 字段不存在或其他值 → 自动使用 SHA1
+- 接口不可访问 → 先尝试 SHA256，失败后自动切换 SHA1
+
 ### ⚡ 性能优化
 
 | 优化策略 | 说明 | 效果 |
@@ -84,33 +97,21 @@
 
 ### 如何判断我的路由器是否支持？
 
-**第一步：登录路由器管理页面**
-
-浏览器打开 `http://192.168.31.1`（改成你的路由器 IP），输入管理密码登录。
-
-登录成功后，看浏览器地址栏，URL 会变成类似这样：
+只需在浏览器中直接访问以下地址（将 `192.168.31.1` 替换为你的路由器 IP）：
 
 ```
-http://192.168.31.1/cgi-bin/luci/;stok=abcdef1234567890/web/home
+http://192.168.31.1/cgi-bin/luci/api/xqsystem/init_info
 ```
 
-其中 `stok=` 后面那串字符就是你的 token。
-
-**第二步：访问 init_info 接口**
-
-把地址栏 URL 最后的 `/web/home` 改成 `/api/xqsystem/init_info`，回车访问：
-
-```
-http://192.168.31.1/cgi-bin/luci/;stok=abcdef1234567890/api/xqsystem/init_info
-```
-
-如果页面显示 JSON 数据，能看到路由器型号，就说明完全支持：
+- **如果页面显示 JSON 数据**，包含路由器型号等信息，说明完全支持：
 
 ```json
-{"hardware":{"platform":"RD18","version":"1.0.53","displayName":"Xiaomi BE5000"},...}
+{"hardware":{"platform":"RD18","version":"1.0.53","displayName":"Xiaomi BE5000"}, "newEncryptMode":1, ...}
 ```
 
-如果登录失败或页面报错，说明路由器不支持。
+- **如果页面报错或无响应**，说明路由器不支持此接口，本集成可能无法使用
+
+> 💡 这个接口**不需要登录**即可访问，同时返回的 `newEncryptMode` 字段也告诉我们路由器使用的加密方式。
 
 ## 📥 安装
 
@@ -218,6 +219,9 @@ automation:
 
 ## ❓ 常见问题
 
+### Q: 出现 invalid-auth 错误？
+通常是密码输入错误。如果确认密码无误，可能是路由器固件使用的加密算法不同。v1.3.5+ 已支持自动检测加密方式（SHA256/SHA1），请更新到最新版本。你也可以在浏览器中访问 `http://路由器IP/cgi-bin/luci/api/xqsystem/init_info`，查看返回的 `newEncryptMode` 字段值，并在 [GitHub Issues](https://github.com/tiejiang29/miwifi_router/issues) 中反馈，帮助完善兼容性。
+
 ### Q: 传感器显示"未知"？
 检查路由器 IP 和密码是否正确，确保 HA 和路由器在同一局域网。可在配置中点击"验证"测试连接。
 
@@ -241,7 +245,7 @@ automation:
 ```
 custom_components/miwifi_router/
 ├── __init__.py          # 集成入口
-├── api.py               # 路由器 API 客户端（登录、stok缓存、Keep-Alive）
+├── api.py               # 路由器 API 客户端（登录、加密算法自动检测、stok缓存、Keep-Alive）
 ├── config_flow.py       # UI 配置流程（含设备选择步骤）
 ├── const.py             # 常量定义
 ├── coordinator.py       # 数据更新协调器（分层轮询策略）

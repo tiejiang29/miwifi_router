@@ -10,7 +10,12 @@ Key design decisions (inspired by dmamontov/hass-miwifi patterns):
   session from a previous run (e.g., from config_flow or HA restart).
 - On "not auth" errors during login, we retry with backoff instead of
   immediately raising an error — this handles transient session conflicts.
-- BE5000 (RD18) uses SHA256+SHA256 for password hashing.
+- Hash algorithm auto-detection:
+  Before login, we try to read init_info without authentication.
+  If it contains newEncryptMode=1, the router uses SHA256+SHA256.
+  Otherwise (newEncryptMode=0 or missing), it uses SHA1+SHA1.
+  If init_info is not accessible, we default to SHA256 and fallback to SHA1
+  on "密码错误" error.
 """
 
 from __future__ import annotations
@@ -103,9 +108,10 @@ class MiWiFiAPIClient:
     ]
 
     def __init_hash_algo(self) -> None:
-        """Initialize hash algorithm. Try SHA256 first, fallback to SHA1."""
+        """Initialize hash algorithm. Default to SHA256, may be overridden by init_info."""
         self._hash_algo_name: str = "SHA256"
         self._hash_algo = hashlib.sha256
+        self._hash_algo_detected: bool = False  # True once detected via init_info or successful login
 
     def _try_next_hash_algo(self) -> bool:
         """Switch to the next hash algorithm. Returns True if switched, False if no more."""
@@ -193,23 +199,82 @@ class MiWiFiAPIClient:
         self._stok = None
         _LOGGER.debug("Stok cleared for %s after logout", self._host)
 
+    async def _detect_hash_algo_from_init_info(self) -> None:
+        """Try to detect the hash algorithm from init_info without authentication.
+
+        Some routers allow unauthenticated access to /api/xqsystem/init_info.
+        The newEncryptMode field determines the hash algorithm:
+        - newEncryptMode=1 -> SHA256+SHA256 (new firmware explicitly declares this)
+        - Field missing or any other value -> SHA1+SHA1 (old firmware default)
+        If init_info is not accessible without auth, we keep the default and
+        fallback on login failure.
+        """
+        if self._hash_algo_detected:
+            return  # Already detected
+
+        try:
+            url = f"{self._base_url}{API_INIT_INFO}"
+            async with aiohttp.ClientSession(
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
+            ) as session:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                    allow_redirects=True,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        encrypt_mode = data.get("newEncryptMode")
+                        if encrypt_mode == 1:
+                            # New firmware explicitly declares SHA256
+                            self._hash_algo_name = "SHA256"
+                            self._hash_algo = hashlib.sha256
+                            _LOGGER.info(
+                                "Detected newEncryptMode=1 (SHA256) from init_info for %s",
+                                self._host,
+                            )
+                        else:
+                            # Old firmware: field missing or other value -> SHA1
+                            self._hash_algo_name = "SHA1"
+                            self._hash_algo = hashlib.sha1
+                            _LOGGER.info(
+                                "Detected newEncryptMode=%s (SHA1) from init_info for %s",
+                                encrypt_mode, self._host,
+                            )
+                        self._hash_algo_detected = True
+                    else:
+                        _LOGGER.debug(
+                            "init_info returned status %s for %s, will try default algorithm",
+                            resp.status, self._host,
+                        )
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not read init_info for hash detection on %s: %s",
+                self._host, err,
+            )
+
     async def _login(self) -> None:
         """Authenticate with the router and cache the stok.
 
-        Login flow (inspired by hass-miwifi):
-        1. On FIRST login ever, call logout() to clear any stale session
+        Login flow:
+        1. Detect hash algorithm from init_info (if accessible without auth)
+        2. On FIRST login ever, call logout() to clear any stale session
            from a previous run (config_flow, HA restart, etc.), then wait 1s.
-        2. Create a fresh aiohttp session (no stale cookies)
-        3. GET the router's root page first — triggers router to clear
+        3. Create a fresh aiohttp session (no stale cookies)
+        4. GET the router's root page first — triggers router to clear
            any stale server-side session associated with our IP.
-        4. POST the login data with SHA256+SHA256 hashed password
-        5. If "not auth" (session conflict), retry with exponential backoff
-        6. Extract stok from response
+        5. POST the login data with detected hash algorithm
+        6. If "密码错误" and hash not yet confirmed, fallback to other algorithm
+        7. If "not auth" (session conflict), retry with exponential backoff
+        8. Extract stok from response
 
         The stok is kept indefinitely (no local expiry). The router
         maintains the session server-side. When the router eventually
         invalidates it, we'll get a 401 and re-login then.
         """
+        # Step 1: Try to detect hash algorithm from init_info
+        await self._detect_hash_algo_from_init_info()
+
         # On first login, clear any stale session from previous runs
         if self._is_first_login:
             _LOGGER.debug("First login for %s, clearing stale session", self._host)
@@ -286,6 +351,7 @@ class MiWiFiAPIClient:
             _LOGGER.error("Could not extract stok from login response: %s", data)
             raise MiWiFiConnectionError("Could not extract stok from login response")
 
+        self._hash_algo_detected = True  # Confirmed by successful login
         _LOGGER.info(
             "Successfully logged in to MiWiFi router at %s "
             "using %s (stok will be reused until router rejects it)",
