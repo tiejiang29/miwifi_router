@@ -28,3 +28,6 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Release zips (uploaded as GitHub release assets, not committed)
+*.zip
