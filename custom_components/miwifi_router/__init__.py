@@ -14,7 +14,7 @@ from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_SCAN_INTERVAL, Pl
 from homeassistant.core import HomeAssistant
 
 from .api import MiWiFiAPIClient
-from .const import CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import CONF_DEVICE_SCAN_INTERVAL, CONF_FORCE_HASH_ALGO, DEFAULT_DEVICE_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DOMAIN
 from .coordinator import MiWiFiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,9 +30,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     device_scan_interval = entry.options.get(
         CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
     )
+    force_hash_algo = entry.options.get(CONF_FORCE_HASH_ALGO) or None
 
     # Create API client with hass instance for non-blocking aiohttp session
-    api = MiWiFiAPIClient(host, password, hass=hass)
+    api = MiWiFiAPIClient(host, password, hass=hass, force_hash_algo=force_hash_algo)
 
     # Create coordinator with layered polling and re-authorization support
     coordinator = MiWiFiCoordinator(

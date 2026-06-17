@@ -8,7 +8,8 @@
           "host": "路由器 IP 地址",
           "password": "路由器管理密码",
           "scan_interval": "实时数据轮询间隔（秒，默认 10）",
-          "device_scan_interval": "设备列表轮询间隔（秒，默认 30）"
+          "device_scan_interval": "设备列表轮询间隔（秒，默认 30）",
+          "force_hash_algo": "密码哈希算法（一般选 Auto 即可，登录失败再手动指定）"
         }
       },
       "devices": {
@@ -21,7 +22,7 @@
     },
     "error": {
       "cannot_connect": "无法连接到路由器",
-      "invalid_auth": "密码错误",
+      "invalid_auth": "密码错误或哈希算法不匹配（可尝试手动指定 SHA1/SHA256）",
       "unknown": "发生未知错误"
     },
     "abort": {
@@ -36,7 +37,8 @@
         "data": {
           "scan_interval": "实时数据轮询间隔（秒）",
           "device_scan_interval": "设备列表轮询间隔（秒）",
-          "tracked_devices": "需添加传感器的设备"
+          "tracked_devices": "需添加传感器的设备",
+          "force_hash_algo": "密码哈希算法（一般选 Auto 即可，登录失败再手动指定）"
         }
       }
     }

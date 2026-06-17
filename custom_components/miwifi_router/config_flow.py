@@ -16,6 +16,7 @@ from homeassistant.helpers import config_validation as cv
 from .api import MiWiFiAPIClient, MiWiFiAuthError, MiWiFiConnectionError
 from .const import (
     CONF_DEVICE_SCAN_INTERVAL,
+    CONF_FORCE_HASH_ALGO,
     CONF_TRACKED_DEVICES,
     DEFAULT_DEVICE_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
@@ -39,6 +40,7 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_scan_interval: int = DEFAULT_DEVICE_SCAN_INTERVAL
         self._device_names: dict[str, str] = {}
         self._device_options: dict[str, str] = {}
+        self._force_hash_algo: str | None = None
 
     @staticmethod
     @callback
@@ -61,13 +63,16 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             device_scan_interval = user_input.get(
                 CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
             )
+            force_hash_algo = user_input.get(CONF_FORCE_HASH_ALGO) or None
 
             # Check if already configured
             await self.async_set_unique_id(host)
             self._abort_if_unique_id_configured()
 
             # Test connection with hass for non-blocking aiohttp
-            api = MiWiFiAPIClient(host, password, hass=self.hass)
+            api = MiWiFiAPIClient(
+                host, password, hass=self.hass, force_hash_algo=force_hash_algo
+            )
             try:
                 await api.test_connection()
 
@@ -76,6 +81,7 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._password = password
                 self._scan_interval = scan_interval
                 self._device_scan_interval = device_scan_interval
+                self._force_hash_algo = force_hash_algo
 
                 # Fetch device list for device selection step
                 try:
@@ -129,6 +135,13 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_DEVICE_SCAN_INTERVAL, default=DEFAULT_DEVICE_SCAN_INTERVAL
                 ): int,
+                vol.Optional(
+                    CONF_FORCE_HASH_ALGO, default=""
+                ): vol.In({
+                    "": "Auto-detect (recommended)",
+                    "SHA1": "Force SHA1 (old firmware: AX3600, AC2100, AX9000, etc.)",
+                    "SHA256": "Force SHA256 (new firmware: BE5000, BE3600, Router 7000, etc.)",
+                }),
             }
         )
 
@@ -177,6 +190,7 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_SCAN_INTERVAL: self._scan_interval,
                 CONF_DEVICE_SCAN_INTERVAL: self._device_scan_interval,
                 CONF_TRACKED_DEVICES: tracked_devices,
+                CONF_FORCE_HASH_ALGO: self._force_hash_algo or "",
             },
         )
 
@@ -210,6 +224,7 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
                     CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
                 ),
                 CONF_TRACKED_DEVICES: tracked_devices,
+                CONF_FORCE_HASH_ALGO: user_input.get(CONF_FORCE_HASH_ALGO, "") or "",
             }
             return self.async_create_entry(title="", data=data)
 
@@ -261,6 +276,14 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
                     CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
                 ),
             ): int,
+            vol.Optional(
+                CONF_FORCE_HASH_ALGO,
+                default=self._config_entry.options.get(CONF_FORCE_HASH_ALGO, ""),
+            ): vol.In({
+                "": "Auto-detect (recommended)",
+                "SHA1": "Force SHA1 (old firmware: AX3600, AC2100, AX9000, etc.)",
+                "SHA256": "Force SHA256 (new firmware: BE5000, BE3600, Router 7000, etc.)",
+            }),
         }
 
         if device_options:

@@ -8,14 +8,71 @@ Key design decisions (inspired by dmamontov/hass-miwifi patterns):
 - Login uses a FRESH aiohttp session to avoid stale cookie interference.
 - Before the FIRST login, we call logout() to clear any stale server-side
   session from a previous run (e.g., from config_flow or HA restart).
-- On "not auth" errors during login, we retry with backoff instead of
-  immediately raising an error — this handles transient session conflicts.
+- On login failure with one hash algorithm, we try the OTHER algorithm
+  once (since "not auth" per dmamontov Issue #62 means wrong hash, not
+  session conflict — retrying the same hash is pointless).
 - Hash algorithm auto-detection:
-  Before login, we try to read init_info without authentication.
-  If it contains newEncryptMode=1, the router uses SHA256+SHA256.
-  Otherwise (newEncryptMode=0 or missing), it uses SHA1+SHA1.
-  If init_info is not accessible, we default to SHA256 and fallback to SHA1
-  on "密码错误" error.
+  Before login, we try to read init_info WITHOUT authentication from TWO
+  URL paths:
+    1. /api/xqsystem/init_info              (new firmware, e.g. BE5000)
+    2. /cgi-bin/luci/api/xqsystem/init_info (old firmware, e.g. AX3600)
+  If it contains newEncryptMode=1, the router uses SHA256+SHA256 — we try
+  SHA256 first.
+  Otherwise (newEncryptMode=0 or missing, OR init_info unreachable on both
+  paths), the router uses SHA1+SHA1 — we try SHA1 first.
+  On login failure, we automatically try the OTHER algorithm once.
+  Switching is NOT tied to error message text (some firmware returns
+  English "not auth" instead of Chinese "密码错误"; per dmamontov Issue #62,
+  "not auth" simply means "wrong password/hash", not session conflict).
+  Total: at most 2 HTTP login requests (1 per algorithm).
+  User can also force a specific algorithm via force_hash_algo to skip
+  auto-detection and fallback entirely.
+
+v1.3.9: Fix "Invalid nonce" error caused by rapid re-login.
+  Symptom (from user HA log 2026-06-17):
+  - test_connection() logged in successfully, then logged out
+  - 300ms later, coordinator's first refresh tried to login again
+  - Both nonces shared the same Unix second timestamp
+  - Router rejected the second one with {'code': 1582, 'msg': 'Invalid nonce'}
+  - Old code then wrongly switched to SHA256 (which also failed)
+  - Eventually succeeded on a 3rd attempt after creating a fresh client
+  Fix:
+  - Use real client MAC in nonce (uuid.getnode()) instead of placeholder
+    "00:00:00:00:00:00". Matches what router's JS Encrypt.oldPwd() does,
+    and matches dmamontov/hass-miwifi behavior.
+  - Recognize code=1582 "Invalid nonce" specifically: this is NOT a wrong
+    hash problem, so DON'T switch algorithm. Instead, wait 2s for router
+    to release the previous session, then retry the SAME algorithm.
+  - Add a class-level nonce counter to guarantee uniqueness within same
+    second (extra entropy beyond timestamp + random).
+  - Demote all [DEBUG]-tagged log statements from warning to debug level.
+    Users who want detailed login diagnostics should enable debug logging
+    for the miwifi_router integration in HA's logger config.
+
+v1.3.7-debug: Enhanced debug logging for login authentication troubleshooting.
+  Every step of the login process now logs detailed info including:
+  - nonce generation, inner/outer hash computation
+  - full response bodies from init_info and login
+  - cookie headers and redirect tracking
+  - hash algorithm detection and switching details
+
+v1.3.8: Fix critical login failure on old-firmware routers.
+  Root cause (from user HA log 2026-06-16):
+  - Router returned `{'code': 401, 'msg': 'not auth'}` for SHA256 login attempts
+  - Old code only switched to SHA1 when msg contained "密码错误" (Chinese),
+    but router returned English "not auth" → SHA1 fallback never triggered
+  - init_info URL only tried /api/xqsystem/init_info (404 on old firmware),
+    not /cgi-bin/luci/api/xqsystem/init_info
+  Fix (per dmamontov/hass-miwifi Issue #62 analysis):
+  - Try BOTH init_info URL paths (with and without /cgi-bin/luci/ prefix)
+  - Trust init_info detection as first attempt:
+    * newEncryptMode=1 -> try SHA256 first, then SHA1
+    * newEncryptMode!=1 or init_info unreachable -> try SHA1 first, then SHA256
+  - Each algorithm is tried AT MOST ONCE (not auth = wrong hash, retrying
+    same hash is pointless). Total: 2 HTTP requests max.
+  - Switching is NO LONGER tied to error message text.
+  - Added optional force_hash_algo parameter for manual override (locks
+    algorithm, no fallback).
 """
 
 from __future__ import annotations
@@ -25,6 +82,7 @@ import hashlib
 import logging
 import random
 import time
+import uuid
 from typing import Any
 
 import aiohttp
@@ -46,7 +104,16 @@ _LOGGER = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
 DEFAULT_CALL_DELAY = 1  # seconds to wait after logout before re-login
-MAX_LOGIN_RETRIES = 4  # 2 per hash algorithm (SHA256 + SHA1 fallback)
+MAX_LOGIN_RETRIES = 2  # Total: 2 algorithms × ATTEMPTS_PER_ALGO
+ATTEMPTS_PER_ALGO = 1  # Attempts per hash algorithm before switching
+# Router returns code=1582 "Invalid nonce" when:
+#   - Two logins share the same nonce within the same second
+#   - The previous session is still being torn down server-side
+# When we see 1582, we DON'T switch algorithm (it's not a hash problem).
+# Instead, we wait NONCE_RETRY_DELAY seconds and retry the SAME algorithm.
+INVALID_NONCE_CODE = 1582
+NONCE_RETRY_DELAY = 2  # seconds to wait before retrying on Invalid nonce
+MAX_NONCE_RETRIES = 2  # max retries on Invalid nonce per algorithm
 
 
 class MiWiFiAuthError(Exception):
@@ -66,7 +133,7 @@ class MiWiFiAPIClient:
     session is still alive on the router side.
     """
 
-    def __init__(self, host: str, password: str, hass=None) -> None:
+    def __init__(self, host: str, password: str, hass=None, force_hash_algo: str | None = None) -> None:
         self._host = host
         self._password = password
         self._base_url = f"http://{host}"
@@ -81,7 +148,12 @@ class MiWiFiAPIClient:
         self._mac: str | None = None
         self._model: str | None = None
         self._firmware: str | None = None
+        self._force_hash_algo = force_hash_algo  # "SHA1" | "SHA256" | None
         self.__init_hash_algo()
+        _LOGGER.debug(
+            "[DEBUG] MiWiFiAPIClient created for %s | public_key=%s | force_hash_algo=%s",
+            host, PUBLIC_KEY, force_hash_algo,
+        )
 
     def _get_session(self) -> aiohttp.ClientSession:
         """Get HA's shared aiohttp client session for authenticated requests."""
@@ -108,11 +180,33 @@ class MiWiFiAPIClient:
     ]
 
     def __init_hash_algo(self) -> None:
-        """Initialize hash algorithm. Default to SHA256, may be overridden by init_info."""
-        self._hash_algo_name: str = "SHA256"
-        self._hash_algo = hashlib.sha256
-        self._hash_algo_detected: bool = False  # True once detected via init_info or successful login
-        self._hash_algos_tried: set[str] = set()  # Track which algorithms have been tried
+        """Initialize hash algorithm.
+
+        Priority:
+          1. force_hash_algo (if set by user) — locks the algorithm, no auto-detection
+          2. Otherwise default to SHA1 (most old firmware uses SHA1; new firmware
+             typically exposes init_info without auth, so detection succeeds for them
+             and we'll switch to SHA256 before login)
+        """
+        if self._force_hash_algo in ("SHA1", "SHA256"):
+            self._hash_algo_name: str = self._force_hash_algo
+            self._hash_algo = hashlib.sha1 if self._force_hash_algo == "SHA1" else hashlib.sha256
+            self._hash_algo_detected: bool = True  # User forced it, treat as detected
+            _LOGGER.debug(
+                "[DEBUG] Hash algo FORCED to %s by user config (auto-detection disabled)",
+                self._hash_algo_name,
+            )
+        else:
+            # Default to SHA1 — covers most old firmware routers (AX3600, AC2100, etc.)
+            # New firmware routers typically expose init_info without auth, so
+            # _detect_hash_algo_from_init_info will switch us to SHA256 before login.
+            self._hash_algo_name = "SHA1"
+            self._hash_algo = hashlib.sha1
+            self._hash_algo_detected = False
+            _LOGGER.debug(
+                "[DEBUG] Hash algo initialized: default=SHA1 (will be overridden by init_info if available)",
+            )
+        self._hash_algos_tried: set[str] = set()
 
     def _switch_hash_algo(self) -> bool:
         """Switch to the OTHER hash algorithm (SHA256<->SHA1).
@@ -124,26 +218,36 @@ class MiWiFiAPIClient:
 
         Returns True if switched, False if both algorithms have been tried.
         """
+        old_name = self._hash_algo_name
         self._hash_algos_tried.add(self._hash_algo_name)
+
+        _LOGGER.debug(
+            "[DEBUG] _switch_hash_algo called for %s | current=%s | tried=%s",
+            self._host, old_name, self._hash_algos_tried,
+        )
 
         # Find an algorithm we haven't tried yet
         for name, algo in self._HASH_ALGORITHMS:
             if name not in self._hash_algos_tried:
-                old_name = self._hash_algo_name
                 self._hash_algo_name = name
                 self._hash_algo = algo
-                _LOGGER.info(
-                    "Switching hash algorithm from %s to %s for %s",
+                _LOGGER.debug(
+                    "[DEBUG] Switching hash algorithm from %s to %s for %s",
                     old_name, name, self._host,
                 )
                 return True
 
+        _LOGGER.debug(
+            "[DEBUG] All hash algorithms tried for %s: %s",
+            self._host, self._hash_algos_tried,
+        )
         return False  # All algorithms tried
 
     @staticmethod
     def _hash(text: str, algo) -> str:
         """Hash text using the specified algorithm."""
-        return algo(text.encode("utf-8")).hexdigest()
+        result = algo(text.encode("utf-8")).hexdigest()
+        return result
 
     def _build_login_password(self, nonce: str) -> str:
         """Build the login password hash.
@@ -151,21 +255,71 @@ class MiWiFiAPIClient:
         Algorithm: hash(nonce + hash(password + public_key))
         Newer routers use SHA256, older routers use SHA1.
         """
-        inner_hash = self._hash(self._password + PUBLIC_KEY, self._hash_algo)
-        return self._hash(nonce + inner_hash, self._hash_algo)
+        inner_input = self._password + PUBLIC_KEY
+        inner_hash = self._hash(inner_input, self._hash_algo)
+        outer_input = nonce + inner_hash
+        outer_hash = self._hash(outer_input, self._hash_algo)
+        _LOGGER.debug(
+            "[DEBUG] _build_login_password for %s | algo=%s | "
+            "inner_input_len=%d | inner_hash=%s | "
+            "outer_input_len=%d | outer_hash=%s",
+            self._host, self._hash_algo_name,
+            len(inner_input), inner_hash,
+            len(outer_input), outer_hash,
+        )
+        return outer_hash
 
     @staticmethod
-    def _generate_nonce() -> str:
+    def _get_client_mac() -> str:
+        """Get the local machine's MAC address for use in nonce.
+
+        Uses uuid.getnode() which returns the MAC as an integer.
+        Falls back to "00:00:00:00:00:00" if getnode() fails or returns
+        a non-MAC value (some platforms return a random 48-bit integer
+        when no real MAC is available, indicated by the multicast bit).
+
+        This matches the behavior of dmamontov/hass-miwifi and the
+        router's own JS Encrypt.oldPwd() which uses the browser/device MAC.
+        """
+        try:
+            node = uuid.getnode()
+            # uuid.getnode() may return a random value if no MAC is found.
+            # The 8th bit (multicast) of the first octet indicates this.
+            # We still use it — the router doesn't strictly validate the MAC,
+            # it just needs a stable identifier that looks like a MAC.
+            as_hex = f"{node:012x}"
+            return ":".join(as_hex[i:i + 2] for i in range(0, 12, 2))
+        except Exception:
+            return "00:00:00:00:00:00"
+
+    # Class-level nonce counter — guarantees uniqueness within the same second
+    # even if two nonces are generated back-to-back.
+    _nonce_counter: int = 0
+
+    @classmethod
+    def _generate_nonce(cls) -> str:
         """Generate a nonce for login.
 
-        Format: {type}_{mac}_{timestamp}_{random}
-        The MAC in nonce is NOT validated by the router - placeholder works.
+        Format: {type}_{mac}_{timestamp}_{random}_{counter}
+        - mac: real client MAC (from uuid.getnode())
+        - timestamp: Unix seconds
+        - random: 1000-9999
+        - counter: monotonically increasing within the same second,
+          guarantees uniqueness even when two nonces share a timestamp
+
+        The MAC in nonce is NOT strictly validated by the router, but using
+        a real MAC matches what the router's JS expects and what other
+        MiWiFi clients (dmamontov, browser) send.
         """
         nonce_type = 0
-        placeholder_mac = "00:00:00:00:00:00"
+        mac = cls._get_client_mac()
         now = int(time.time())
         rand = random.randint(1000, 9999)
-        return f"{nonce_type}_{placeholder_mac}_{now}_{rand}"
+        # Increment counter for uniqueness within same second
+        cls._nonce_counter += 1
+        nonce = f"{nonce_type}_{mac}_{now}_{rand}_{cls._nonce_counter}"
+        _LOGGER.debug("[DEBUG] Generated nonce: %s", nonce)
+        return nonce
 
     async def _ensure_stok(self) -> str:
         """Ensure we have a stok. Only login if we don't have one yet.
@@ -217,85 +371,138 @@ class MiWiFiAPIClient:
     async def _detect_hash_algo_from_init_info(self) -> None:
         """Try to detect the hash algorithm from init_info without authentication.
 
-        Some routers allow unauthenticated access to /api/xqsystem/init_info.
-        The newEncryptMode field determines the hash algorithm:
-        - newEncryptMode=1 -> SHA256+SHA256 (new firmware explicitly declares this)
-        - Field missing or any other value -> SHA1+SHA1 (old firmware default)
-        If init_info is not accessible without auth, we keep the default and
-        fallback on login failure.
+        Some routers allow unauthenticated access to init_info. The URL path
+        differs between firmware versions:
+          - New firmware (BE5000, etc.):  /api/xqsystem/init_info
+          - Old firmware (AX3600, etc.): /cgi-bin/luci/api/xqsystem/init_info
+
+        We try BOTH paths. The newEncryptMode field determines the hash algorithm:
+          - newEncryptMode=1 -> SHA256+SHA256 (new firmware explicitly declares this)
+          - Field missing or any other value -> SHA1+SHA1 (old firmware default)
+
+        If neither path is accessible without auth, we keep the default (SHA1)
+        and rely on the login retry strategy to try the other algorithm.
         """
         if self._hash_algo_detected:
-            return  # Already detected
+            _LOGGER.debug(
+                "[DEBUG] Hash algo already detected/forced as %s for %s, skipping init_info",
+                self._hash_algo_name, self._host,
+            )
+            return  # Already detected or forced by user
 
-        try:
-            url = f"{self._base_url}{API_INIT_INFO}"
-            async with aiohttp.ClientSession(
-                cookie_jar=aiohttp.CookieJar(unsafe=True),
-            ) as session:
-                async with session.get(
-                    url,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                    allow_redirects=True,
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        encrypt_mode = data.get("newEncryptMode")
-                        if encrypt_mode == 1:
-                            # New firmware explicitly declares SHA256
-                            self._hash_algo_name = "SHA256"
-                            self._hash_algo = hashlib.sha256
-                            _LOGGER.info(
-                                "Detected newEncryptMode=1 (SHA256) from init_info for %s",
+        # Try both URL paths — old firmware uses /cgi-bin/luci/ prefix, new firmware does not
+        urls_to_try = [
+            f"{self._base_url}{API_INIT_INFO}",                          # /api/xqsystem/init_info
+            f"{self._base_url}/cgi-bin/luci{API_INIT_INFO}",             # /cgi-bin/luci/api/xqsystem/init_info
+        ]
+
+        for url in urls_to_try:
+            try:
+                _LOGGER.debug("[DEBUG] Fetching init_info (no auth) from %s", url)
+                async with aiohttp.ClientSession(
+                    cookie_jar=aiohttp.CookieJar(unsafe=True),
+                ) as session:
+                    async with session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                        allow_redirects=True,
+                    ) as resp:
+                        _LOGGER.debug(
+                            "[DEBUG] init_info response: status=%s, content_type=%s for %s (url=%s)",
+                            resp.status, resp.content_type, self._host, url,
+                        )
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            _LOGGER.debug(
+                                "[DEBUG] init_info full response for %s: %s",
                                 self._host,
+                                str(data)[:500],
                             )
-                        else:
-                            # Old firmware: field missing or other value -> SHA1
-                            self._hash_algo_name = "SHA1"
-                            self._hash_algo = hashlib.sha1
-                            _LOGGER.info(
-                                "Detected newEncryptMode=%s (SHA1) from init_info for %s",
+                            encrypt_mode = data.get("newEncryptMode")
+                            _LOGGER.debug(
+                                "[DEBUG] init_info newEncryptMode=%s for %s",
                                 encrypt_mode, self._host,
                             )
-                        self._hash_algo_detected = True
-                    else:
-                        _LOGGER.debug(
-                            "init_info returned status %s for %s, will try default algorithm",
-                            resp.status, self._host,
-                        )
-        except Exception as err:
-            _LOGGER.debug(
-                "Could not read init_info for hash detection on %s: %s",
-                self._host, err,
-            )
+                            if encrypt_mode == 1:
+                                # New firmware explicitly declares SHA256
+                                self._hash_algo_name = "SHA256"
+                                self._hash_algo = hashlib.sha256
+                                _LOGGER.debug(
+                                    "[DEBUG] Detected newEncryptMode=1 -> SHA256 for %s",
+                                    self._host,
+                                )
+                            else:
+                                # Old firmware: field missing or other value -> SHA1
+                                self._hash_algo_name = "SHA1"
+                                self._hash_algo = hashlib.sha1
+                                _LOGGER.debug(
+                                    "[DEBUG] Detected newEncryptMode=%s -> SHA1 for %s",
+                                    encrypt_mode, self._host,
+                                )
+                            self._hash_algo_detected = True
+                            return  # Got it, no need to try other URL
+                        else:
+                            resp_text = await resp.text()
+                            _LOGGER.debug(
+                                "[DEBUG] init_info returned status %s for %s (url=%s), body: %s",
+                                resp.status, self._host, url, resp_text[:300],
+                            )
+                            # Try next URL path
+            except Exception as err:
+                _LOGGER.debug(
+                    "[DEBUG] Could not read init_info at %s for %s: %s",
+                    url, self._host, err,
+                )
+                # Try next URL path
+
+        _LOGGER.debug(
+            "[DEBUG] All init_info URL paths failed for %s, keeping default algo=%s",
+            self._host, self._hash_algo_name,
+        )
 
     async def _login(self) -> None:
         """Authenticate with the router and cache the stok.
 
-        Login flow:
-        1. Detect hash algorithm from init_info (if accessible without auth)
-        2. On FIRST login ever, call logout() to clear any stale session
-           from a previous run (config_flow, HA restart, etc.), then wait 1s.
-        3. Create a fresh aiohttp session (no stale cookies)
-        4. GET the router's root page first — triggers router to clear
-           any stale server-side session associated with our IP.
-        5. POST the login data with detected hash algorithm
-        6. If "密码错误" and hash not yet confirmed, fallback to other algorithm
-        7. If "not auth" (session conflict), retry with exponential backoff
-        8. Extract stok from response
+        Login flow (v1.3.9):
+        1. Detect hash algorithm from init_info (try BOTH URL paths).
+           - newEncryptMode=1 detected -> current_algo = SHA256
+           - newEncryptMode!=1 OR init_info unreachable -> current_algo = SHA1
+        2. On FIRST login ever, call logout() to clear any stale session,
+           then wait 1s.
+        3. Try current algorithm ONCE.
+        4. If it fails with code=1582 "Invalid nonce": DON'T switch algorithm
+           (this is not a hash problem). Wait 2s for the router to release the
+           previous session, then retry the SAME algorithm.
+           Up to MAX_NONCE_RETRIES retries per algorithm.
+        5. If it fails with other errors (e.g. "not auth" = wrong hash),
+           switch to the OTHER algorithm and try ONCE (with same nonce retry
+           behavior if 1582 occurs).
+           *** Switching is NOT tied to error message text. Per dmamontov
+           Issue #62, "not auth" means wrong hash, retrying same hash is
+           pointless. ***
+        6. If user set force_hash_algo, only that algorithm is tried (no
+           fallback to other algorithm, but Invalid nonce retry still applies).
+        7. Extract stok from response on success.
 
-        The stok is kept indefinitely (no local expiry). The router
-        maintains the session server-side. When the router eventually
-        invalidates it, we'll get a 401 and re-login then.
+        Total: at most 2 algorithms × (1 + MAX_NONCE_RETRIES) HTTP requests
+        when not forced; (1 + MAX_NONCE_RETRIES) when forced.
+
+        The stok is kept indefinitely (no local expiry). The router maintains
+        the session server-side. When the router eventually invalidates it,
+        we'll get a 401 and re-login then.
         """
-        # Step 1: Try to detect hash algorithm from init_info
-        await self._detect_hash_algo_from_init_info()
+        _LOGGER.debug(
+            "[DEBUG] _login() called for %s | first_login=%s | current_algo=%s | detected=%s | forced=%s",
+            self._host, self._is_first_login, self._hash_algo_name,
+            self._hash_algo_detected, self._force_hash_algo is not None,
+        )
 
-        # Reset tried algorithms tracker for this login attempt
-        self._hash_algos_tried = {self._hash_algo_name}
+        # Step 1: Try to detect hash algorithm from init_info (skipped if user forced)
+        await self._detect_hash_algo_from_init_info()
 
         # On first login, clear any stale session from previous runs
         if self._is_first_login:
-            _LOGGER.debug("First login for %s, clearing stale session", self._host)
+            _LOGGER.debug("[DEBUG] First login for %s, clearing stale session", self._host)
             try:
                 await self.logout()
             except Exception as err:
@@ -303,74 +510,148 @@ class MiWiFiAPIClient:
             await asyncio.sleep(DEFAULT_CALL_DELAY)
             self._is_first_login = False
 
-        for attempt in range(1, MAX_LOGIN_RETRIES + 1):
-            data = await self._do_login_request(attempt)
-
-            if data.get("code") == 0:
-                break  # Success!
-
-            error_msg = data.get("msg", "Unknown error")
-            error_code = data.get("code")
-
-            # "密码错误" means wrong hash algorithm or wrong password
-            # Try the other hash algorithm before giving up
-            if "密码错误" in str(error_msg):
-                switched = self._switch_hash_algo()
-                if switched:
-                    continue
-                _LOGGER.error(
-                    "Login failed for %s: wrong password with all hash algorithms (code=%s)",
-                    self._host, error_code,
-                )
-                raise MiWiFiAuthError(f"Invalid password: {error_msg}")
-
-            # "not auth" with code 401 usually means session conflict
-            # (another login is still active). Retry with backoff.
-            if attempt < MAX_LOGIN_RETRIES:
-                backoff = attempt * 2  # 2s, 4s
-                _LOGGER.debug(
-                    "Login attempt %d/%d got code=%s msg='%s' for %s, "
-                    "retrying in %ds",
-                    attempt, MAX_LOGIN_RETRIES, error_code, error_msg,
-                    self._host, backoff,
-                )
-                await asyncio.sleep(backoff)
-                continue
-
-            # All retries exhausted
-            if error_code == 401:
-                _LOGGER.error(
-                    "Login failed for %s after %d attempts: code=%s, msg=%s",
-                    self._host, MAX_LOGIN_RETRIES, error_code, error_msg,
-                )
-                raise MiWiFiAuthError(f"Authentication failed: {error_msg}")
-
-            _LOGGER.error(
-                "Login failed for %s after %d attempts: code=%s, msg=%s",
-                self._host, MAX_LOGIN_RETRIES, error_code, error_msg,
+        # Step 2: Build algorithm order
+        # - If user forced: only try that ONE algorithm
+        # - Otherwise: try detected/default first, then the OTHER as fallback
+        if self._force_hash_algo in ("SHA1", "SHA256"):
+            algo_order = [self._hash_algo_name]
+            _LOGGER.debug(
+                "[DEBUG] Hash algo FORCED to %s, no algorithm fallback for %s",
+                self._hash_algo_name, self._host,
             )
-            raise MiWiFiConnectionError(f"Login failed: {error_msg}")
-
-        # Extract stok from the URL field or token field
-        url = data.get("url", "")
-        if ";stok=" in url:
-            self._stok = url.split(";stok=")[1].split("/")[0]
         else:
-            self._stok = data.get("token", "")
+            other_algo = "SHA1" if self._hash_algo_name == "SHA256" else "SHA256"
+            algo_order = [self._hash_algo_name, other_algo]
+            _LOGGER.debug(
+                "[DEBUG] Login algo order for %s: %s (try each ONCE, total %d attempts, "
+                "plus up to %d nonce retries per algo on code 1582)",
+                self._host, algo_order, len(algo_order), MAX_NONCE_RETRIES,
+            )
 
-        if not self._stok:
-            _LOGGER.error("Could not extract stok from login response: %s", data)
-            raise MiWiFiConnectionError("Could not extract stok from login response")
+        # Step 3: Try each algorithm in order
+        # Within each algorithm, retry on Invalid nonce (code 1582) up to
+        # MAX_NONCE_RETRIES times. Other errors -> switch to next algorithm.
+        last_error_code = None
+        last_error_msg = ""
+        last_response: dict[str, Any] = {}
+        attempt = 0  # global attempt counter for logging
 
-        self._hash_algo_detected = True  # Confirmed by successful login
-        _LOGGER.info(
-            "Successfully logged in to MiWiFi router at %s "
-            "using %s (stok will be reused until router rejects it)",
-            self._host, self._hash_algo_name,
+        for algo_idx, algo_name in enumerate(algo_order):
+            # Switch algorithm if needed (after first iteration)
+            if algo_idx > 0:
+                _LOGGER.debug(
+                    "[DEBUG] Previous algorithm %s failed for %s, switching to %s as fallback",
+                    algo_order[algo_idx - 1], self._host, algo_name,
+                )
+                self._hash_algo_name = algo_name
+                self._hash_algo = hashlib.sha1 if algo_name == "SHA1" else hashlib.sha256
+                # Brief delay between algorithm switches
+                await asyncio.sleep(1)
+
+            # Try this algorithm, with retries on Invalid nonce
+            nonce_retry = 0
+            while True:
+                attempt += 1
+                _LOGGER.debug(
+                    "[DEBUG] Login attempt %d for %s with algo=%s (algo_idx=%d, nonce_retry=%d/%d)",
+                    attempt, self._host, self._hash_algo_name,
+                    algo_idx, nonce_retry, MAX_NONCE_RETRIES,
+                )
+
+                data = await self._do_login_request(attempt)
+                last_response = data
+
+                _LOGGER.debug(
+                    "[DEBUG] Login attempt %d response for %s: code=%s, msg=%s, full=%s",
+                    attempt, self._host, data.get("code"), data.get("msg", ""),
+                    str(data)[:500],
+                )
+
+                if data.get("code") == 0:
+                    _LOGGER.debug(
+                        "[DEBUG] Login SUCCESS for %s on attempt %d with algo=%s",
+                        self._host, attempt, self._hash_algo_name,
+                    )
+                    self._hash_algo_detected = True
+                    # Extract stok
+                    url = data.get("url", "")
+                    if ";stok=" in url:
+                        self._stok = url.split(";stok=")[1].split("/")[0]
+                    else:
+                        self._stok = data.get("token", "")
+
+                    if not self._stok:
+                        _LOGGER.error(
+                            "Could not extract stok from login response: %s", data,
+                        )
+                        raise MiWiFiConnectionError(
+                            "Could not extract stok from login response"
+                        )
+
+                    _LOGGER.info(
+                        "Successfully logged in to MiWiFi router at %s using %s "
+                        "(stok will be reused until router rejects it)",
+                        self._host, self._hash_algo_name,
+                    )
+
+                    # After successful login, try to get router info
+                    await self._fetch_router_info_after_login()
+                    return  # Success!
+
+                # Failed — record error
+                last_error_code = data.get("code")
+                last_error_msg = str(data.get("msg", ""))
+
+                # Special case: Invalid nonce (code 1582)
+                # This is NOT a hash problem — it means the router rejected
+                # our nonce because either:
+                #   (a) we generated two nonces within the same second, OR
+                #   (b) a previous session is still being torn down
+                # Solution: wait and retry the SAME algorithm with a fresh nonce.
+                if last_error_code == INVALID_NONCE_CODE:
+                    if nonce_retry < MAX_NONCE_RETRIES:
+                        nonce_retry += 1
+                        _LOGGER.debug(
+                            "[DEBUG] Got Invalid nonce (code 1582) for %s with algo=%s, "
+                            "waiting %ds before retry (nonce_retry=%d/%d)",
+                            self._host, self._hash_algo_name,
+                            NONCE_RETRY_DELAY, nonce_retry, MAX_NONCE_RETRIES,
+                        )
+                        await asyncio.sleep(NONCE_RETRY_DELAY)
+                        continue  # retry same algorithm with fresh nonce
+                    else:
+                        _LOGGER.debug(
+                            "[DEBUG] Invalid nonce retries exhausted for %s with algo=%s "
+                            "(tried %d times), moving on",
+                            self._host, self._hash_algo_name, nonce_retry,
+                        )
+                        break  # move to next algorithm (or fail)
+                else:
+                    # Other error (e.g. "not auth" = wrong hash) — don't retry,
+                    # move to next algorithm immediately
+                    _LOGGER.debug(
+                        "[DEBUG] Algorithm %s failed for %s: code=%s msg='%s' (not retryable)",
+                        algo_name, self._host, last_error_code, last_error_msg,
+                    )
+                    break  # move to next algorithm
+
+        # All algorithms and nonce retries exhausted
+        _LOGGER.debug(
+            "[DEBUG] Login failed for %s after %d attempt(s) across %d algorithm(s): "
+            "code=%s, msg=%s, last_response=%s",
+            self._host, attempt, len(algo_order),
+            last_error_code, last_error_msg, str(last_response)[:500],
         )
 
-        # After successful login, try to get router info
-        await self._fetch_router_info_after_login()
+        # Provide a more helpful error message
+        if last_error_code == 401:
+            raise MiWiFiAuthError(
+                f"Authentication failed: {last_error_msg} "
+                f"(tried algorithms: {algo_order}, last code: {last_error_code})"
+            )
+        raise MiWiFiConnectionError(
+            f"Login failed: {last_error_msg} (code: {last_error_code})"
+        )
 
     async def _do_login_request(self, attempt: int = 1) -> dict[str, Any]:
         """Send a single login POST request and return the response dict.
@@ -382,8 +663,10 @@ class MiWiFiAPIClient:
         login_url = f"{self._base_url}{API_LOGIN}"
 
         _LOGGER.debug(
-            "Login attempt %d to %s | nonce=%s | pwd_hash_len=%d",
-            attempt, self._host, nonce, len(password),
+            "[DEBUG] _do_login_request attempt %d for %s | algo=%s | "
+            "nonce=%s | pwd_hash_len=%d | login_url=%s",
+            attempt, self._host, self._hash_algo_name,
+            nonce, len(password), login_url,
         )
 
         # Use a fresh session for login to avoid stale cookie interference
@@ -399,34 +682,42 @@ class MiWiFiAPIClient:
                     allow_redirects=True,
                 ) as pre_resp:
                     _LOGGER.debug(
-                        "Pre-login GET status: %s (clearing stale session)",
-                        pre_resp.status,
+                        "[DEBUG] Pre-login GET status: %s for %s (clearing stale session)",
+                        pre_resp.status, self._host,
                     )
             except Exception as pre_err:
                 _LOGGER.debug("Pre-login GET failed (non-fatal): %s", pre_err)
 
             # Step 2: POST login data
             try:
+                post_data = {
+                    "username": "admin",
+                    "password": password,
+                    "logtype": "2",
+                    "nonce": nonce,
+                }
+                _LOGGER.debug(
+                    "[DEBUG] POST login for %s | username=admin | logtype=2 | "
+                    "nonce=%s | password_hash=%s",
+                    self._host, nonce, password,
+                )
                 async with login_session.post(
                     login_url,
-                    data={
-                        "username": "admin",
-                        "password": password,
-                        "logtype": "2",
-                        "nonce": nonce,
-                    },
+                    data=post_data,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
                     allow_redirects=False,
                 ) as resp:
-                    _LOGGER.debug("Login response status: %s", resp.status)
+                    _LOGGER.debug(
+                        "[DEBUG] Login response status: %s for %s",
+                        resp.status, self._host,
+                    )
 
                     if resp.status != 200:
                         resp_text = await resp.text()
-                        _LOGGER.error(
-                            "Login HTTP error: status %s, body: %s",
-                            resp.status,
-                            resp_text[:300],
+                        _LOGGER.debug(
+                            "[DEBUG] Login HTTP error for %s: status %s, body: %s",
+                            self._host, resp.status, resp_text[:300],
                         )
                         raise MiWiFiConnectionError(
                             f"Login HTTP error: status {resp.status}"
@@ -434,21 +725,20 @@ class MiWiFiAPIClient:
 
                     data = await resp.json(content_type=None)
                     _LOGGER.debug(
-                        "Login response: code=%s, msg=%s",
-                        data.get("code"),
-                        data.get("msg"),
+                        "[DEBUG] Login response JSON for %s: %s",
+                        self._host, str(data)[:500],
                     )
                     return data
 
             except aiohttp.ClientError as err:
-                _LOGGER.error("Cannot connect to router at %s: %s", self._host, err)
+                _LOGGER.debug("[DEBUG] Cannot connect to router at %s: %s", self._host, err)
                 raise MiWiFiConnectionError(
                     f"Cannot connect to router: {err}"
                 ) from err
             except MiWiFiConnectionError:
                 raise
             except Exception as err:
-                _LOGGER.error("Unexpected login error: %s", err)
+                _LOGGER.debug("[DEBUG] Unexpected login error for %s: %s", self._host, err)
                 raise MiWiFiConnectionError(f"Login error: {err}") from err
 
     async def _fetch_router_info_after_login(self) -> None:

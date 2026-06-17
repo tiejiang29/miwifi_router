@@ -54,7 +54,7 @@
 
 ### 🔐 加密算法自动检测
 
-> 🆕 v1.3.5 新增
+> 🆕 v1.3.5 新增，v1.3.8 重大修复
 
 MiWiFi 路由器登录密码的哈希算法因固件版本不同而异：
 - **新固件**（如 BE5000）：使用 SHA256+SHA256
@@ -63,7 +63,26 @@ MiWiFi 路由器登录密码的哈希算法因固件版本不同而异：
 本集成在登录前自动读取路由器 `init_info` 接口中的 `newEncryptMode` 字段判断加密方式，无需用户手动选择：
 - `newEncryptMode=1` → 自动使用 SHA256
 - 字段不存在或其他值 → 自动使用 SHA1
-- 接口不可访问 → 先尝试 SHA256，失败后自动切换 SHA1
+- 接口不可访问 → **默认使用 SHA1**（覆盖大多数老固件），登录失败自动切换到另一种算法
+
+> **v1.3.8 修复内容**（基于用户日志反馈）：
+> - 修复 `init_info` URL 路径只尝试 `/api/xqsystem/init_info` 的问题，新增尝试 `/cgi-bin/luci/api/xqsystem/init_info`（老固件路径）
+> - 修复登录失败时只在错误消息含"密码错误"才切换算法的 BUG — 实际路由器返回英文"not auth"导致 SHA1 fallback 永不触发
+> - 新增重试策略：每个算法尝试 1 次（共 2 次），不再依赖错误消息文本
+> - 默认算法从 SHA256 改为 SHA1（覆盖更多老固件路由器）
+> - 新增可选配置项 `force_hash_algo`，允许用户手动指定 SHA1/SHA256 跳过自动检测
+
+> **v1.3.9 修复内容**（基于用户日志反馈）：
+> - 修复快速连续登录时出现的 `code=1582 Invalid nonce` 错误
+>   - 原因：`test_connection` 成功 logout 后，coordinator 几百毫秒内再次登录，两个 nonce 时间戳相同，被路由器拒绝
+>   - 修复：nonce 使用真实客户端 MAC（`uuid.getnode()`），并增加单调计数器保证同一秒内 nonce 唯一
+> - 识别 `code=1582 Invalid nonce` 错误码：不再误切换算法（这是 nonce 问题不是哈希问题），等待 2 秒后重试同算法，最多重试 2 次
+> - 调试日志（`[DEBUG]` 前缀）从 `warning` 级别降回正常的 `debug` 级别，HA 默认配置下不再产生噪音。如需排查登录问题，在 `configuration.yaml` 中开启：
+>   ```yaml
+>   logger:
+>     logs:
+>       custom_components.miwifi_router: debug
+>   ```
 
 ### ⚡ 性能优化
 
@@ -220,7 +239,24 @@ automation:
 ## ❓ 常见问题
 
 ### Q: 出现 invalid-auth 错误？
-通常是密码输入错误。如果确认密码无误，可能是路由器固件使用的加密算法不同。v1.3.5+ 已支持自动检测加密方式（SHA256/SHA1），请更新到最新版本。你也可以在浏览器中访问 `http://路由器IP/cgi-bin/luci/api/xqsystem/init_info`，查看返回的 `newEncryptMode` 字段值，并在 [GitHub Issues](https://github.com/tiejiang29/miwifi_router/issues) 中反馈，帮助完善兼容性。
+
+可能的原因和排查步骤：
+
+1. **确认密码无误**：在浏览器中访问 `http://路由器IP` 并用相同密码登录，验证密码本身正确。
+
+2. **v1.3.7 及更早版本的已知 BUG**：登录失败时只在错误消息含"密码错误"才切换 SHA1/SHA256 算法，但部分路由器返回英文"not auth"，导致 SHA1 fallback 永不触发。**请升级到 v1.3.8+**，新版重写了重试策略：每个算法尝试 2 次（共 4 次），不再依赖错误消息文本。
+
+3. **手动指定算法**：升级到 v1.3.8+ 后，在配置流程的"密码哈希算法"选项中手动选择：
+   - 老固件（AX3600、AC2100、AX9000、Redmi AX6/AX5、AX3000T 等）→ Force SHA1
+   - 新固件（BE5000、BE3600、小米路由器 7000 等，2023 年 5 月后）→ Force SHA256
+
+4. **检查 init_info 接口**：在浏览器中访问以下两个地址之一，查看返回的 `newEncryptMode` 字段：
+   - `http://路由器IP/api/xqsystem/init_info` （新固件路径）
+   - `http://路由器IP/cgi-bin/luci/api/xqsystem/init_info` （老固件路径）
+
+   `newEncryptMode=1` 表示新固件 SHA256，缺失或其它值表示老固件 SHA1。
+
+5. **反馈日志**：如果以上方法均无效，请在 [GitHub Issues](https://github.com/tiejiang29/miwifi_router/issues) 中提交 HA 日志（搜索 `[DEBUG]` 关键字），包含完整的登录过程日志。
 
 ### Q: 传感器显示"未知"？
 检查路由器 IP 和密码是否正确，确保 HA 和路由器在同一局域网。可在配置中点击"验证"测试连接。

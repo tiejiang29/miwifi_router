@@ -7,6 +7,7 @@ CONF_HOST = "host"
 CONF_PASSWORD = "password"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_DEVICE_SCAN_INTERVAL = "device_scan_interval"
+CONF_FORCE_HASH_ALGO = "force_hash_algo"  # Optional: "SHA1" | "SHA256" | None
 
 # Default values
 DEFAULT_SCAN_INTERVAL = 10  # seconds - for realtime data (speeds, counts)
