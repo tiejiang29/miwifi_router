@@ -28,6 +28,27 @@ Key design decisions (inspired by dmamontov/hass-miwifi patterns):
   User can also force a specific algorithm via force_hash_algo to skip
   auto-detection and fallback entirely.
 
+v1.3.10: Revert nonce format to 4-part (regression fix).
+  Symptom (from user HA log 2026-06-17 20:00):
+  - v1.3.6 user with router at 172.16.1.1 was working fine
+  - After upgrading to v1.3.9, login failed with 'not auth' on BOTH
+    SHA256 and SHA1 algorithms
+  - Root cause: v1.3.9 changed nonce format from 4 parts
+    (0_MAC_TS_RAND) to 5 parts (0_MAC_TS_RAND_COUNTER), and this
+    router strictly validates nonce format — rejects 5-part nonces
+    with 'not auth' (not even 'Invalid nonce', which made it look
+    like a hash problem).
+  Fix:
+  - Revert nonce to 4-part format: 0_MAC_TIMESTAMP_RANDOM
+    (matches dmamontov/hass-miwifi and router's JS Encrypt.nonceCreat)
+  - Keep real client MAC from uuid.getnode() (this part didn't cause
+    the regression and is more correct than the placeholder)
+  - Keep the code=1582 Invalid nonce retry logic in _login() — this
+    still handles the rare case where two logins in the same second
+    produce identical timestamps. The router will reject the second
+    one with code=1582, we wait 2s and retry (timestamp advances).
+  - Removed _nonce_counter class variable (no longer needed).
+
 v1.3.9: Fix "Invalid nonce" error caused by rapid re-login.
   Symptom (from user HA log 2026-06-17):
   - test_connection() logged in successfully, then logged out
@@ -274,50 +295,45 @@ class MiWiFiAPIClient:
         """Get the local machine's MAC address for use in nonce.
 
         Uses uuid.getnode() which returns the MAC as an integer.
-        Falls back to "00:00:00:00:00:00" if getnode() fails or returns
-        a non-MAC value (some platforms return a random 48-bit integer
-        when no real MAC is available, indicated by the multicast bit).
+        Falls back to "00:00:00:00:00:00" if getnode() fails.
 
         This matches the behavior of dmamontov/hass-miwifi and the
         router's own JS Encrypt.oldPwd() which uses the browser/device MAC.
         """
         try:
             node = uuid.getnode()
-            # uuid.getnode() may return a random value if no MAC is found.
-            # The 8th bit (multicast) of the first octet indicates this.
-            # We still use it — the router doesn't strictly validate the MAC,
-            # it just needs a stable identifier that looks like a MAC.
             as_hex = f"{node:012x}"
             return ":".join(as_hex[i:i + 2] for i in range(0, 12, 2))
         except Exception:
             return "00:00:00:00:00:00"
 
-    # Class-level nonce counter — guarantees uniqueness within the same second
-    # even if two nonces are generated back-to-back.
-    _nonce_counter: int = 0
-
     @classmethod
     def _generate_nonce(cls) -> str:
         """Generate a nonce for login.
 
-        Format: {type}_{mac}_{timestamp}_{random}_{counter}
+        Format: {type}_{mac}_{timestamp}_{random}  (4 parts)
+
+        Matches the format used by dmamontov/hass-miwifi and the router's
+        own JS Encrypt.nonceCreat(). Some routers strictly validate the
+        nonce format (e.g. reject 5-part nonces), so we MUST stay with
+        the 4-part format that has been working since v1.0.
+
         - mac: real client MAC (from uuid.getnode())
         - timestamp: Unix seconds
         - random: 1000-9999
-        - counter: monotonically increasing within the same second,
-          guarantees uniqueness even when two nonces share a timestamp
 
-        The MAC in nonce is NOT strictly validated by the router, but using
-        a real MAC matches what the router's JS expects and what other
-        MiWiFi clients (dmamontov, browser) send.
+        If two logins happen within the same second, they may generate
+        the same timestamp portion of the nonce. This is handled by the
+        code=1582 "Invalid nonce" retry logic in _login() — the router
+        will reject the second one, we wait 2s, then retry the SAME
+        algorithm with a fresh nonce (the timestamp will have advanced
+        by then).
         """
         nonce_type = 0
         mac = cls._get_client_mac()
         now = int(time.time())
         rand = random.randint(1000, 9999)
-        # Increment counter for uniqueness within same second
-        cls._nonce_counter += 1
-        nonce = f"{nonce_type}_{mac}_{now}_{rand}_{cls._nonce_counter}"
+        nonce = f"{nonce_type}_{mac}_{now}_{rand}"
         _LOGGER.debug("[DEBUG] Generated nonce: %s", nonce)
         return nonce
 
