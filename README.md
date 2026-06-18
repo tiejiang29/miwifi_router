@@ -10,15 +10,23 @@
 
 ### 📊 路由器传感器 (Sensor)
 
-| 传感器 | 说明 | 单位 |
-|--------|------|------|
-| Download Speed | WAN 下载速率 | B/s |
-| Upload Speed | WAN 上传速率 | B/s |
-| Download Total | 累计下载量 | B |
-| Upload Total | 累计上传量 | B |
-| Online Devices | 在线设备数 | 台 |
-| CPU Load | CPU 负载 | % |
-| Memory Usage | 内存使用率 | % |
+| 传感器 | 说明 | 原生单位 | UI 展示单位 |
+|--------|------|---------|------------|
+| Download Speed | WAN 下载速率 | B/s | MB/s（自动缩放 B/KB/MB） |
+| Upload Speed | WAN 上传速率 | B/s | MB/s（自动缩放 B/KB/MB） |
+| Download Total | 累计下载量 | B | GB（自动缩放 B/KB/MB/GB/TB） |
+| Upload Total | 累计上传量 | B | GB（自动缩放 B/KB/MB/GB/TB） |
+| Online Devices | 在线设备数 | devices | devices |
+| CPU Load | CPU 负载 | % | % |
+| Memory Usage | 内存使用率 | % | % |
+
+> 🆕 **v1.3.11 单位展示优化**
+> - 实时速度和累计流量传感器增加了 `device_class`（DATA_RATE / DATA_SIZE）和 `suggested_unit_of_measurement`（MB/s / GB）
+> - Lovelace 卡片会**根据数值大小自动选择最合适的单位**（5 MB / 50 GB / 5 TB），不会再出现 42662921949 B 这种长数字
+> - 底层 `native_unit` 保持 B / B/s 不变，**长期统计和能量面板完全不受影响**
+> - 新增 `raw_b` 实体属性，保留原始字节数值方便模板/自动化使用
+> - 保留 `human_readable` 属性作为备用（如 "2.45 MB/s" 字符串）
+> - 建议 HA 2024.1+ 以获得最佳单位显示效果
 
 ### 📱 设备追踪 (Device Tracker)
 
@@ -36,12 +44,12 @@
 
 在集成配置中手动选择需要监控的设备，为每个选中设备自动创建 **4 个独立传感器**：
 
-| 传感器 | 说明 | 单位 |
-|--------|------|------|
-| {设备名} Download Speed | 设备下载速率 | B/s |
-| {设备名} Upload Speed | 设备上传速率 | B/s |
-| {设备名} Download Total | 设备累计下载量 | B |
-| {设备名} Upload Total | 设备累计上传量 | B |
+| 传感器 | 说明 | 原生单位 | UI 展示单位 |
+|--------|------|---------|------------|
+| {设备名} Download Speed | 设备下载速率 | B/s | MB/s（自动缩放） |
+| {设备名} Upload Speed | 设备上传速率 | B/s | MB/s（自动缩放） |
+| {设备名} Download Total | 设备累计下载量 | B | GB（自动缩放） |
+| {设备名} Upload Total | 设备累计上传量 | B | GB（自动缩放） |
 
 **与 device_tracker 的区别**：
 - `device_tracker` 的速率数据是属性（attribute），**不记录历史**，无法在图表中展示
