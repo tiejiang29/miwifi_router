@@ -9,6 +9,10 @@ CONF_SCAN_INTERVAL = "scan_interval"
 CONF_DEVICE_SCAN_INTERVAL = "device_scan_interval"
 CONF_FORCE_HASH_ALGO = "force_hash_algo"  # Optional: "SHA1" | "SHA256" | None
 
+# Internal marker (stored in entry.options) — set after v1.3.12 sensor unit
+# migration runs once. Prevents repeated entity removal on every reload.
+SENSOR_UNIT_MIGRATED = "sensor_unit_migrated"
+
 # Default values
 DEFAULT_SCAN_INTERVAL = 10  # seconds - for realtime data (speeds, counts)
 DEFAULT_DEVICE_SCAN_INTERVAL = 30  # seconds - for device list details

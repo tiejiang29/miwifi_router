@@ -28,6 +28,13 @@
 > - 保留 `human_readable` 属性作为备用（如 "2.45 MB/s" 字符串）
 > - 建议 HA 2024.1+ 以获得最佳单位显示效果
 
+> 🆕 **v1.3.12 自动迁移老实体**
+> - v1.3.11 的单位优化只对**新创建**的实体生效，老实体需要删除重建
+> - v1.3.12 在集成加载时**自动检测并删除老 sensor 实体**，下次 platform setup 时会带新的 `suggested_unit` 重新创建
+> - 迁移只跑一次（用 `sensor_unit_migrated` 标记持久化到 entry.options）
+> - **副作用**：被删除的 sensor 实体的历史状态数据将不再关联新实体（短期图表数据会丢，长期统计 `statistics` 表数据不受影响）
+> - 如果你想保留历史数据，可以在升级 v1.3.12 前手动备份 `.storage/core.entity_registry`
+
 ### 📱 设备追踪 (Device Tracker)
 
 - 每个连接设备自动创建 `device_tracker` 实体
