@@ -20,22 +20,12 @@
 | CPU Load | CPU 负载 | % | (固定) |
 | Memory Usage | 内存使用率 | % | (固定) |
 
-> 🆕 **v1.4.0 用户可选单位 + 中文本地化 + 修改确认**
-> - 在集成配置里新增 **`speed_unit`**（实时速度单位）和 **`total_unit`**（累计流量单位）两个下拉选项
-> - 默认 `Auto` = 跟之前一样用 B/s 和 B（最大兼容性，能量面板/长期统计完全不受影响）
-> - 选其他单位（如 MB/s, GB）后，`native_unit_of_measurement` 改为对应单位，`native_value` 自动换算
-> - 单位切换会**自动触发实体重建**（HA 限制：state_class 实体不能动态改 native_unit），相关实体的**历史状态数据会丢失**
-> - 修改单位时会弹出**确认对话框**，明确警告历史数据丢失，用户必须勾选确认才生效
-> - 长期统计（statistics 表）和能量面板不受影响，新数据按新单位继续累计
-> - 任何情况下都保留 `raw_b` 属性（原始字节数）和 `human_readable` 属性（友好字符串）
-> - 完整中文本地化：所有标题、描述、字段标签、实体名都中文化（基于 `translations/zh-Hans.json`）
-> 
-> **历史变更说明**：
-> - v1.3.11/v1.3.12 曾用 `device_class + suggested_unit_of_measurement` 方案，但 HA 会把 suggested_unit 固化成展示单位，导致小数值显示成 `0.00 MB/s`
-> - v1.3.14 回退该方案，改为用户自选单位
-> - v1.3.16 加修改确认步骤
-> - v1.3.17 修复 translations 加载（自定义集成必须用 `translations/` 目录，不能用 `strings.json`）
-> - **v1.4.0** 整合所有修复 + 在初次添加表单加单位修改提示语
+**单位说明**：
+- 默认 `Auto` = 用 B/s 和 B（不换算，最大兼容性，能量面板/长期统计完全不受影响）
+- 选其他单位（如 MB/s、GB）后，传感器状态值会按所选单位自动换算
+- 单位同时支持 1000 进制（SI：kB/MB/GB）和 1024 进制（IEC：KiB/MiB/GiB）
+- `raw_b` 属性始终保留原始字节数值，方便模板/自动化使用
+- `human_readable` 属性提供友好字符串（如 "2.45 MB/s"）
 
 ### 📱 设备追踪 (Device Tracker)
 
@@ -49,8 +39,6 @@
 
 ### 📶 设备传感器 (Per-Device Sensor)
 
-> 🆕 v1.3.0 新增
-
 在集成配置中手动选择需要监控的设备，为每个选中设备自动创建 **4 个独立传感器**：
 
 | 传感器 | 说明 | 默认单位 | 可选单位 |
@@ -62,7 +50,7 @@
 
 **与 device_tracker 的区别**：
 - `device_tracker` 的速率数据是属性（attribute），**不记录历史**，无法在图表中展示
-- `device_sensor` 是独立传感器实体，**支持历史记录**，可直接用于 mini-graph-card 等图表卡片
+- `device传感器` 是独立传感器实体，**支持历史记录**，可直接用于 mini-graph-card 等图表卡片
 
 **特性**：
 - 新建条目时可选择设备，也可跳过稍后配置
@@ -71,8 +59,6 @@
 
 ### 🔐 加密算法自动检测
 
-> 🆕 v1.3.5 新增，v1.3.8 重大修复
-
 MiWiFi 路由器登录密码的哈希算法因固件版本不同而异：
 - **新固件**（如 BE5000）：使用 SHA256+SHA256
 - **老固件**（如 AX3600、AC2100、AX9000）：使用 SHA1+SHA1
@@ -80,33 +66,9 @@ MiWiFi 路由器登录密码的哈希算法因固件版本不同而异：
 本集成在登录前自动读取路由器 `init_info` 接口中的 `newEncryptMode` 字段判断加密方式，无需用户手动选择：
 - `newEncryptMode=1` → 自动使用 SHA256
 - 字段不存在或其他值 → 自动使用 SHA1
-- 接口不可访问 → **默认使用 SHA1**（覆盖大多数老固件），登录失败自动切换到另一种算法
+- 接口不可访问 → 默认使用 SHA1，登录失败自动切换到另一种算法重试
 
-> **v1.3.8 修复内容**（基于用户日志反馈）：
-> - 修复 `init_info` URL 路径只尝试 `/api/xqsystem/init_info` 的问题，新增尝试 `/cgi-bin/luci/api/xqsystem/init_info`（老固件路径）
-> - 修复登录失败时只在错误消息含"密码错误"才切换算法的 BUG — 实际路由器返回英文"not auth"导致 SHA1 fallback 永不触发
-> - 新增重试策略：每个算法尝试 1 次（共 2 次），不再依赖错误消息文本
-> - 默认算法从 SHA256 改为 SHA1（覆盖更多老固件路由器）
-> - 新增可选配置项 `force_hash_algo`，允许用户手动指定 SHA1/SHA256 跳过自动检测
-
-> **v1.3.9 修复内容**（基于用户日志反馈）：
-> - 修复快速连续登录时出现的 `code=1582 Invalid nonce` 错误
->   - 原因：`test_connection` 成功 logout 后，coordinator 几百毫秒内再次登录，两个 nonce 时间戳相同，被路由器拒绝
->   - 修复：nonce 使用真实客户端 MAC（`uuid.getnode()`），并增加单调计数器保证同一秒内 nonce 唯一
-> - 识别 `code=1582 Invalid nonce` 错误码：不再误切换算法（这是 nonce 问题不是哈希问题），等待 2 秒后重试同算法，最多重试 2 次
-> - 调试日志（`[DEBUG]` 前缀）从 `warning` 级别降回正常的 `debug` 级别，HA 默认配置下不再产生噪音。如需排查登录问题，在 `configuration.yaml` 中开启：
->   ```yaml
->   logger:
->     logs:
->       custom_components.miwifi_router: debug
->   ```
-
-> **v1.3.10 修复内容**（v1.3.9 回归修复）：
-> - 修复 v1.3.9 引入的 nonce 格式回归 BUG：v1.3.9 把 nonce 从 4 段改为 5 段（加了 counter），部分路由器严格校验 nonce 格式会拒绝 5 段 nonce，导致登录失败
-> - 回到 4 段格式：`0_<MAC>_<时间戳>_<随机数>`，与 v1.3.6、dmamontov/hass-miwifi、路由器 JS 一致
-> - 保留 v1.3.9 的真实 MAC 改进（用 `uuid.getnode()` 取本机网卡 MAC，比占位符更接近路由器 JS 的预期）
-> - 保留 v1.3.9 的 `code=1582 Invalid nonce` 重试逻辑 — 仍然能处理同一秒内连续登录的极端情况
-> - **如果你从 v1.3.6 升级到 v1.3.9 后登录失败，请升级到 v1.3.10**
+如果自动检测后登录仍然失败，可以在配置里手动指定 SHA1 或 SHA256 跳过自动检测。
 
 ### ⚡ 性能优化
 
@@ -171,9 +133,9 @@ http://192.168.31.1/cgi-bin/luci/api/xqsystem/init_info
   - `newEncryptMode` 字段缺失、为 0 或其他值 → 老固件，使用 SHA1（无需手动选，集成会自动检测）
   - 两个地址都打不开 → 集成默认用 SHA1，登录失败会自动切换到 SHA256 重试
 
-> 💡 这些接口**都不需要登录**即可访问。集成会自动按"地址 1 → 地址 2"的顺序尝试，并用返回结果决定登录算法，所以你**不需要手动选择**算法 —— 默认的"Auto-detect"模式已经覆盖所有情况。
+> 💡 这些接口**都不需要登录**即可访问。集成会自动按"地址 1 → 地址 2"的顺序尝试，并用返回结果决定登录算法，所以你**不需要手动选择**算法 —— 默认的"自动检测"模式已经覆盖所有情况。
 >
-> 如果自动检测后登录仍然失败，可以在集成配置里手动选择 `Force SHA1` 或 `Force SHA256` 作为兜底。
+> 如果自动检测后登录仍然失败，可以在集成配置里手动选择"强制 SHA1"或"强制 SHA256"作为兜底。
 
 ## 📥 安装
 
@@ -203,21 +165,54 @@ cp -r custom_components/miwifi_router /config/custom_components/
 
 1. 进入 **设置 → 设备与服务 → 添加集成**
 2. 搜索 "MiWiFi Router"
-3. 填写连接信息：
+3. 填写连接信息和选项：
    - **路由器 IP 地址**：默认 `192.168.31.1`
    - **路由器管理密码**：MiWiFi 管理界面登录密码
-   - **实时数据轮询间隔**（`scan_interval`）：默认 10 秒
-   - **设备列表轮询间隔**（`device_scan_interval`）：默认 30 秒
+   - **实时数据轮询间隔**：默认 10 秒
+   - **设备列表轮询间隔**：默认 30 秒
+   - **密码哈希算法**：默认"自动检测"，登录失败可手动选 SHA1/SHA256
+   - **实时网速传感器单位**：默认"自动（B/s，不换算）"，可选 B/s、kB/s、MB/s、GB/s 等
+   - **累计流量传感器单位**：默认"自动（B，不换算）"，可选 B、kB、MB、GB、TB 等
 4. 连接成功后，进入 **选择需添加传感器的设备** 步骤：
    - 勾选需要监控的设备（可跳过，稍后添加）
    - 每个选中设备将创建 4 个独立传感器
 5. 提交完成
 
+> ℹ️ 单位选定后可在配置中修改，但修改会触发传感器实体重建，历史数据将丢失。
+
 ### 修改配置
 
 1. 进入 **设置 → 设备与服务 → MiWiFi Router → ⚙️ 配置**
-2. 在 **需添加传感器的设备** 下拉框中勾选/取消设备
-3. 提交后集成自动重载，传感器立即生效
+2. 可修改以下选项：
+   - **实时数据/设备列表轮询间隔**
+   - **需添加传感器的设备**：勾选/取消设备
+   - **密码哈希算法**：切换 SHA1/SHA256/自动检测
+   - **实时网速传感器单位**：切换显示单位
+   - **累计流量传感器单位**：切换显示单位
+3. 提交后集成自动重载，配置立即生效
+
+### 关于修改单位的确认提示
+
+当你在配置里修改"实时网速传感器单位"或"累计流量传感器单位"时，提交后会弹出**确认对话框**：
+
+- 显示具体变化（如 "网速单位：auto → MB/s"）
+- 警告：传感器实体将被重建，历史状态数据会丢失
+- 说明不受影响的：长期统计、能量面板、raw_b 属性
+- 必须勾选"我已了解历史数据会丢失，确认继续"才会真正保存
+- 不勾选直接提交 → 回到配置页面，不保存任何修改
+
+**为什么需要确认？**
+HA 限制：state_class 实体（如累计流量）不能动态修改 native_unit。改单位必须删除老实体重建，老实体的历史状态数据会丢失。长期统计和能量面板数据不受影响。
+
+### 单位选择建议
+
+| 场景 | 推荐单位 |
+|------|---------|
+| 使用能量面板 | Auto（默认 B/s 和 B） |
+| 想看可读的网速（如 5 MB/s） | MB/s |
+| 想看可读的累计流量（如 50 GB） | GB |
+| 家宽 1000Mbps，下载速度常见 10-100 MB/s | MB/s |
+| 想精确控制（用于模板计算） | Auto，配合 raw_b 属性 |
 
 ## 📖 使用示例
 
@@ -232,6 +227,34 @@ entities:
   - sensor.xiaomizhu_lu_you_qi_istoreos_upload_speed
 name: istoreos 网速
 hours_to_show: 1
+```
+
+### 在模板中获取原始字节数
+
+无论传感器显示单位是什么，`raw_b` 属性始终保留原始字节数，方便模板/自动化精确计算：
+
+```jinja
+{# 获取下载速率的原始字节数 #}
+{{ state_attr('sensor.miwifi_router_download_speed', 'raw_b') }}
+{# 输出: 2630 (单位 B/s) #}
+
+{# 获取累计下载量的原始字节数 #}
+{{ state_attr('sensor.miwifi_router_download_total', 'raw_b') }}
+{# 输出: 42662921949 (单位 B) #}
+
+{# 换算成 GB 显示 #}
+{{ (state_attr('sensor.miwifi_router_download_total', 'raw_b') / 1073741824) | round(2) }} GiB
+{# 输出: 39.73 #}
+```
+
+### 在模板中使用 human_readable 友好字符串
+
+```jinja
+{{ state_attr('sensor.miwifi_router_download_speed', 'human_readable') }}
+{# 输出: "2.63 KB/s" #}
+
+{{ state_attr('sensor.miwifi_router_download_total', 'human_readable') }}
+{# 输出: "42.66 GB" #}
 ```
 
 ### 自动化：设备上线通知
@@ -268,15 +291,16 @@ automation:
           message: "{{ trigger.from_state.attributes.friendly_name }} 已断开WiFi超过5分钟"
 ```
 
-### 查看设备速率（device_tracker 属性）
+### 查看 device_tracker 的速率属性
 
-```yaml
-# 在模板中使用
+device_tracker 实体的速率数据是属性，可以直接在模板中读取：
+
+```jinja
 {{ state_attr('device_tracker.miwifi_router_device_xx_xx_xx_xx_xx_xx', 'download_speed_human') }}
-# 输出: "2.45 MB/s"
+{# 输出: "2.45 MB/s" #}
 
 {{ state_attr('device_tracker.miwifi_router_device_xx_xx_xx_xx_xx_xx', 'upload_speed_human') }}
-# 输出: "156.00 KB/s"
+{# 输出: "156.00 KB/s" #}
 ```
 
 ## ❓ 常见问题
@@ -287,19 +311,25 @@ automation:
 
 1. **确认密码无误**：在浏览器中访问 `http://路由器IP` 并用相同密码登录，验证密码本身正确。
 
-2. **v1.3.7 及更早版本的已知 BUG**：登录失败时只在错误消息含"密码错误"才切换 SHA1/SHA256 算法，但部分路由器返回英文"not auth"，导致 SHA1 fallback 永不触发。**请升级到 v1.3.8+**，新版重写了重试策略：每个算法尝试 2 次（共 4 次），不再依赖错误消息文本。
+2. **手动指定算法**：在配置流程的"密码哈希算法"选项中手动选择：
+   - 老固件（AX3600、AC2100、AX9000、Redmi AX6/AX5、AX3000T 等）→ 强制 SHA1
+   - 新固件（BE5000、BE3600、小米路由器 7000 等，2023 年 5 月后）→ 强制 SHA256
 
-3. **手动指定算法**：升级到 v1.3.8+ 后，在配置流程的"密码哈希算法"选项中手动选择：
-   - 老固件（AX3600、AC2100、AX9000、Redmi AX6/AX5、AX3000T 等）→ Force SHA1
-   - 新固件（BE5000、BE3600、小米路由器 7000 等，2023 年 5 月后）→ Force SHA256
-
-4. **检查 init_info 接口**：在浏览器中访问以下两个地址之一，查看返回的 `newEncryptMode` 字段：
+3. **检查 init_info 接口**：在浏览器中访问以下两个地址之一，查看返回的 `newEncryptMode` 字段：
    - `http://路由器IP/api/xqsystem/init_info` （新固件路径）
    - `http://路由器IP/cgi-bin/luci/api/xqsystem/init_info` （老固件路径）
 
    `newEncryptMode=1` 表示新固件 SHA256，缺失或其它值表示老固件 SHA1。
 
-5. **反馈日志**：如果以上方法均无效，请在 [GitHub Issues](https://github.com/tiejiang29/miwifi_router/issues) 中提交 HA 日志（搜索 `[DEBUG]` 关键字），包含完整的登录过程日志。
+4. **检查路由器是否屏蔽了 HA 主机**：如果连续多次登录失败，路由器可能临时屏蔽 HA 主机 IP（防爆破机制）。重启路由器或等待几小时后重试。
+
+5. **反馈日志**：如果以上方法均无效，请在 [GitHub Issues](https://github.com/tiejiang29/miwifi_router/issues) 中提交 HA 日志。先在 `configuration.yaml` 里开启 debug 日志：
+   ```yaml
+   logger:
+     logs:
+       custom_components.miwifi_router: debug
+   ```
+   重启 HA，复现问题，然后把日志里搜 `[DEBUG]` 的内容贴出来。
 
 ### Q: 传感器显示"未知"？
 检查路由器 IP 和密码是否正确，确保 HA 和路由器在同一局域网。可在配置中点击"验证"测试连接。
@@ -319,19 +349,36 @@ automation:
 ### Q: device_tracker 的速率数据和设备传感器有什么区别？
 `device_tracker` 的速率是属性（attribute），HA 不记录属性历史，无法直接画图。设备传感器是独立实体，支持历史记录，可直接用于图表。如果需要在仪表盘中展示设备速率曲线，请选中对应设备创建传感器。
 
+### Q: 修改单位后界面还是显示老单位 / 标题显示"高级选项" / 字段标签显示英文？
+这是 HA 的 translations 缓存问题。translations 在 HA 启动时加载，重新加载集成不会重新加载。请按以下步骤操作：
+
+1. **完全重启 Home Assistant**（不是重新加载集成）
+   - 设置 → 系统 → 右上角电源图标 → 重新启动
+2. **硬刷新浏览器**
+   - Windows/Linux：`Ctrl + Shift + R`
+   - macOS：`Cmd + Shift + R`
+3. **检查 HA 语言设置**
+   - 设置 → 个人资料 → 语言 → 必须是"简体中文"才会加载中文翻译
+
+### Q: 修改单位后历史数据丢失了，能恢复吗？
+不能。HA 限制：state_class 实体（如累计流量）不能动态修改 native_unit，改单位必须删除老实体重建。老实体的状态历史会丢失，但长期统计和能量面板数据不受影响。修改前会弹出确认对话框，请仔细阅读后再确认。
+
 ## 📁 文件结构
 
 ```
 custom_components/miwifi_router/
-├── __init__.py          # 集成入口
+├── __init__.py          # 集成入口（含单位变化检测和实体重建逻辑）
 ├── api.py               # 路由器 API 客户端（登录、加密算法自动检测、stok缓存、Keep-Alive）
-├── config_flow.py       # UI 配置流程（含设备选择步骤）
-├── const.py             # 常量定义
+├── config_flow.py       # UI 配置流程（含设备选择、单位选择、修改确认步骤）
+├── const.py             # 常量定义（含单位选项和换算因子）
 ├── coordinator.py       # 数据更新协调器（分层轮询策略）
 ├── device_tracker.py    # 设备追踪平台（在线检测+单设备速率属性）
 ├── manifest.json        # 集成清单
-├── sensor.py            # 传感器平台（路由器+可选设备传感器）
-└── strings.json         # 配置流程翻译
+├── sensor.py            # 传感器平台（路由器+可选设备传感器，含单位换算）
+├── strings.json         # 翻译源文件（参考用）
+└── translations/        # 实际加载的翻译文件
+    ├── en.json          # 英文
+    └── zh-Hans.json     # 简体中文
 ```
 
 ## 🤝 贡献
