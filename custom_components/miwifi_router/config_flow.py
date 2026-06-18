@@ -17,10 +17,16 @@ from .api import MiWiFiAPIClient, MiWiFiAuthError, MiWiFiConnectionError
 from .const import (
     CONF_DEVICE_SCAN_INTERVAL,
     CONF_FORCE_HASH_ALGO,
+    CONF_SPEED_UNIT,
+    CONF_TOTAL_UNIT,
     CONF_TRACKED_DEVICES,
     DEFAULT_DEVICE_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    SPEED_UNIT_AUTO,
+    SPEED_UNIT_OPTIONS,
+    TOTAL_UNIT_AUTO,
+    TOTAL_UNIT_OPTIONS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +47,8 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_names: dict[str, str] = {}
         self._device_options: dict[str, str] = {}
         self._force_hash_algo: str | None = None
+        self._speed_unit: str = SPEED_UNIT_AUTO
+        self._total_unit: str = TOTAL_UNIT_AUTO
 
     @staticmethod
     @callback
@@ -64,6 +72,8 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
             )
             force_hash_algo = user_input.get(CONF_FORCE_HASH_ALGO) or None
+            speed_unit = user_input.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO) or SPEED_UNIT_AUTO
+            total_unit = user_input.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO) or TOTAL_UNIT_AUTO
 
             # Check if already configured
             await self.async_set_unique_id(host)
@@ -82,6 +92,8 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._scan_interval = scan_interval
                 self._device_scan_interval = device_scan_interval
                 self._force_hash_algo = force_hash_algo
+                self._speed_unit = speed_unit
+                self._total_unit = total_unit
 
                 # Fetch device list for device selection step
                 try:
@@ -142,6 +154,12 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "SHA1": "Force SHA1 (old firmware: AX3600, AC2100, AX9000, etc.)",
                     "SHA256": "Force SHA256 (new firmware: BE5000, BE3600, Router 7000, etc.)",
                 }),
+                vol.Optional(
+                    CONF_SPEED_UNIT, default=SPEED_UNIT_AUTO
+                ): vol.In(SPEED_UNIT_OPTIONS),
+                vol.Optional(
+                    CONF_TOTAL_UNIT, default=TOTAL_UNIT_AUTO
+                ): vol.In(TOTAL_UNIT_OPTIONS),
             }
         )
 
@@ -191,6 +209,8 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_DEVICE_SCAN_INTERVAL: self._device_scan_interval,
                 CONF_TRACKED_DEVICES: tracked_devices,
                 CONF_FORCE_HASH_ALGO: self._force_hash_algo or "",
+                CONF_SPEED_UNIT: self._speed_unit,
+                CONF_TOTAL_UNIT: self._total_unit,
             },
         )
 
@@ -225,6 +245,8 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
                 ),
                 CONF_TRACKED_DEVICES: tracked_devices,
                 CONF_FORCE_HASH_ALGO: user_input.get(CONF_FORCE_HASH_ALGO, "") or "",
+                CONF_SPEED_UNIT: user_input.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO) or SPEED_UNIT_AUTO,
+                CONF_TOTAL_UNIT: user_input.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO) or TOTAL_UNIT_AUTO,
             }
             return self.async_create_entry(title="", data=data)
 
@@ -284,6 +306,14 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
                 "SHA1": "Force SHA1 (old firmware: AX3600, AC2100, AX9000, etc.)",
                 "SHA256": "Force SHA256 (new firmware: BE5000, BE3600, Router 7000, etc.)",
             }),
+            vol.Optional(
+                CONF_SPEED_UNIT,
+                default=self._config_entry.options.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO),
+            ): vol.In(SPEED_UNIT_OPTIONS),
+            vol.Optional(
+                CONF_TOTAL_UNIT,
+                default=self._config_entry.options.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO),
+            ): vol.In(TOTAL_UNIT_OPTIONS),
         }
 
         if device_options:

@@ -10,30 +10,25 @@
 
 ### 📊 路由器传感器 (Sensor)
 
-| 传感器 | 说明 | 原生单位 | UI 展示单位 |
-|--------|------|---------|------------|
-| Download Speed | WAN 下载速率 | B/s | MB/s（自动缩放 B/KB/MB） |
-| Upload Speed | WAN 上传速率 | B/s | MB/s（自动缩放 B/KB/MB） |
-| Download Total | 累计下载量 | B | GB（自动缩放 B/KB/MB/GB/TB） |
-| Upload Total | 累计上传量 | B | GB（自动缩放 B/KB/MB/GB/TB） |
-| Online Devices | 在线设备数 | devices | devices |
-| CPU Load | CPU 负载 | % | % |
-| Memory Usage | 内存使用率 | % | % |
+| 传感器 | 说明 | 默认单位 | 可选单位 |
+|--------|------|---------|---------|
+| Download Speed | WAN 下载速率 | B/s | B/s, kB/s, MB/s, GB/s, KiB/s, MiB/s, GiB/s |
+| Upload Speed | WAN 上传速率 | B/s | 同上 |
+| Download Total | 累计下载量 | B | B, kB, MB, GB, TB, KiB, MiB, GiB, TiB |
+| Upload Total | 累计上传量 | B | 同上 |
+| Online Devices | 在线设备数 | devices | (固定) |
+| CPU Load | CPU 负载 | % | (固定) |
+| Memory Usage | 内存使用率 | % | (固定) |
 
-> 🆕 **v1.3.11 单位展示优化**
-> - 实时速度和累计流量传感器增加了 `device_class`（DATA_RATE / DATA_SIZE）和 `suggested_unit_of_measurement`（MB/s / GB）
-> - Lovelace 卡片会**根据数值大小自动选择最合适的单位**（5 MB / 50 GB / 5 TB），不会再出现 42662921949 B 这种长数字
-> - 底层 `native_unit` 保持 B / B/s 不变，**长期统计和能量面板完全不受影响**
-> - 新增 `raw_b` 实体属性，保留原始字节数值方便模板/自动化使用
-> - 保留 `human_readable` 属性作为备用（如 "2.45 MB/s" 字符串）
-> - 建议 HA 2024.1+ 以获得最佳单位显示效果
-
-> 🆕 **v1.3.12 自动迁移老实体**
-> - v1.3.11 的单位优化只对**新创建**的实体生效，老实体需要删除重建
-> - v1.3.12 在集成加载时**自动检测并删除老 sensor 实体**，下次 platform setup 时会带新的 `suggested_unit` 重新创建
-> - 迁移只跑一次（用 `sensor_unit_migrated` 标记持久化到 entry.options）
-> - **副作用**：被删除的 sensor 实体的历史状态数据将不再关联新实体（短期图表数据会丢，长期统计 `statistics` 表数据不受影响）
-> - 如果你想保留历史数据，可以在升级 v1.3.12 前手动备份 `.storage/core.entity_registry`
+> 🆕 **v1.3.14 用户可选单位**
+> - 在集成配置里新增 **`speed_unit`**（实时速度单位）和 **`total_unit`**（累计流量单位）两个下拉选项
+> - 默认 `Auto` = 跟之前一样用 B/s 和 B（最大兼容性，能量面板/长期统计完全不受影响）
+> - 选其他单位（如 MB/s, GB）后，`native_unit_of_measurement` 改为对应单位，`native_value` 自动换算
+> - 单位切换会**自动触发实体重建**（HA 限制：state_class 实体不能动态改 native_unit），相关实体的**历史状态数据会丢失**
+> - 长期统计（statistics 表）和能量面板不受影响，新数据按新单位继续累计
+> - 任何情况下都保留 `raw_b` 属性（原始字节数）和 `human_readable` 属性（友好字符串）
+> 
+> **回退说明**：v1.3.14 移除了 v1.3.11 引入的 `device_class` 和 `suggested_unit_of_measurement`。原因：HA 把 `suggested_unit` 固化为展示单位后，小数值会显示成 `0.00 MB/s` 这种难看的形式，不智能缩放。现在改回让用户自己选单位，更可控。
 
 ### 📱 设备追踪 (Device Tracker)
 
@@ -51,12 +46,12 @@
 
 在集成配置中手动选择需要监控的设备，为每个选中设备自动创建 **4 个独立传感器**：
 
-| 传感器 | 说明 | 原生单位 | UI 展示单位 |
-|--------|------|---------|------------|
-| {设备名} Download Speed | 设备下载速率 | B/s | MB/s（自动缩放） |
-| {设备名} Upload Speed | 设备上传速率 | B/s | MB/s（自动缩放） |
-| {设备名} Download Total | 设备累计下载量 | B | GB（自动缩放） |
-| {设备名} Upload Total | 设备累计上传量 | B | GB（自动缩放） |
+| 传感器 | 说明 | 默认单位 | 可选单位 |
+|--------|------|---------|---------|
+| {设备名} Download Speed | 设备下载速率 | B/s | 同路由器速度单位 |
+| {设备名} Upload Speed | 设备上传速率 | B/s | 同路由器速度单位 |
+| {设备名} Download Total | 设备累计下载量 | B | 同路由器总量单位 |
+| {设备名} Upload Total | 设备累计上传量 | B | 同路由器总量单位 |
 
 **与 device_tracker 的区别**：
 - `device_tracker` 的速率数据是属性（attribute），**不记录历史**，无法在图表中展示

@@ -9,7 +9,9 @@
           "password": "路由器管理密码",
           "scan_interval": "实时数据轮询间隔（秒，默认 10）",
           "device_scan_interval": "设备列表轮询间隔（秒，默认 30）",
-          "force_hash_algo": "密码哈希算法（一般选 Auto 即可，登录失败再手动指定）"
+          "force_hash_algo": "密码哈希算法（一般选 Auto 即可，登录失败再手动指定）",
+          "speed_unit": "实时网速传感器单位（Auto 表示用 B/s，不换算）",
+          "total_unit": "累计流量传感器单位（Auto 表示用 B，不换算）"
         }
       },
       "devices": {
@@ -33,12 +35,14 @@
     "step": {
       "init": {
         "title": "选择需添加传感器的设备",
-        "description": "调整轮询间隔，选择需添加传感器的设备。取消勾选的设备，其传感器会在重载后自动删除。",
+        "description": "调整轮询间隔，选择需添加传感器的设备。取消勾选的设备，其传感器会在重载后自动删除。\n\n⚠️ 修改网速/流量单位会触发传感器实体重建，对应实体的历史数据将丢失。",
         "data": {
           "scan_interval": "实时数据轮询间隔（秒）",
           "device_scan_interval": "设备列表轮询间隔（秒）",
           "tracked_devices": "需添加传感器的设备",
-          "force_hash_algo": "密码哈希算法（一般选 Auto 即可，登录失败再手动指定）"
+          "force_hash_algo": "密码哈希算法（一般选 Auto 即可，登录失败再手动指定）",
+          "speed_unit": "实时网速传感器单位（修改后历史数据会丢失）",
+          "total_unit": "累计流量传感器单位（修改后历史数据会丢失）"
         }
       }
     }

@@ -18,10 +18,13 @@ from .api import MiWiFiAPIClient
 from .const import (
     CONF_DEVICE_SCAN_INTERVAL,
     CONF_FORCE_HASH_ALGO,
+    CONF_SPEED_UNIT,
+    CONF_TOTAL_UNIT,
     DEFAULT_DEVICE_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    SENSOR_UNIT_MIGRATED,
+    SPEED_UNIT_AUTO,
+    TOTAL_UNIT_AUTO,
 )
 from .coordinator import MiWiFiCoordinator
 
@@ -39,15 +42,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEVICE_SCAN_INTERVAL, DEFAULT_DEVICE_SCAN_INTERVAL
     )
     force_hash_algo = entry.options.get(CONF_FORCE_HASH_ALGO) or None
+    speed_unit = entry.options.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO)
+    total_unit = entry.options.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO)
 
-    # One-time migration (v1.3.12): remove old sensor entities so they get
-    # re-created with the new suggested_unit_of_measurement added in v1.3.11.
-    # HA's suggested_unit_of_measurement only applies on initial entity
-    # creation — existing entities created before v1.3.11 won't pick up the
-    # new suggested unit unless we delete and recreate them.
-    # Idempotent: skipped if SENSOR_UNIT_MIGRATED marker is already set.
-    if not entry.options.get(SENSOR_UNIT_MIGRATED):
-        await _migrate_sensor_entities_for_suggested_unit(hass, entry)
+    # If user changed speed_unit or total_unit, the existing sensor entities
+    # need to be removed and re-created so the new native_unit_of_measurement
+    # takes effect. HA does not allow changing native_unit on the fly for
+    # entities with state_class=TOTAL_INCREASING (long-term stats would break).
+    #
+    # The last applied unit is stored in entry.options as
+    # "_last_applied_speed_unit" / "_last_applied_total_unit". If it differs
+    # from the current value, we remove the sensor entities.
+    await _remove_sensor_entities_if_unit_changed(hass, entry, speed_unit, total_unit)
 
     # Create API client with hass instance for non-blocking aiohttp session
     api = MiWiFiAPIClient(host, password, hass=hass, force_hash_algo=force_hash_algo)
@@ -74,38 +80,77 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     _LOGGER.info(
-        "MiWiFi Router integration set up for %s (scan: %ds, device: %ds)",
+        "MiWiFi Router integration set up for %s (scan: %ds, device: %ds, "
+        "speed_unit: %s, total_unit: %s)",
         host,
         scan_interval,
         device_scan_interval,
+        speed_unit,
+        total_unit,
     )
 
     return True
 
 
-async def _migrate_sensor_entities_for_suggested_unit(
+async def _remove_sensor_entities_if_unit_changed(
     hass: HomeAssistant,
     entry: ConfigEntry,
+    current_speed_unit: str,
+    current_total_unit: str,
 ) -> None:
-    """Remove existing sensor entities so they get re-created with new settings.
+    """Remove sensor entities if speed_unit or total_unit changed.
 
-    This is needed because HA's suggested_unit_of_measurement only applies
-    on initial entity creation. Old sensor entities created before v1.3.11
-    don't have the suggested_unit, so they display in B/s or B instead of
-    the more readable MB/s or GB.
+    This is needed because HA does not allow changing native_unit_of_measurement
+    for an existing entity with state_class (it would break long-term stats).
+    The only way to apply a new unit is to delete the entity and let the
+    platform setup re-create it.
 
     Side effects:
-    - sensor.* entities matching this config entry are removed from the
-      entity registry and will be re-created on the next platform setup.
-    - Historical state data for these entities (in the states table) will
-      no longer be associated with the new entities. Long-term statistics
-      in the statistics table may also become orphaned.
-    - This only runs ONCE per config entry (guarded by SENSOR_UNIT_MIGRATED
-      marker in entry.options).
+    - When units change: ALL sensor entities for this config entry are removed
+      (including non-speed/non-total ones like cpu_load, online_devices).
+      This is because we delete in bulk for simplicity. They will all be
+      re-created immediately after by async_forward_entry_setups.
+    - State history for these entities is orphaned (lost).
+    - Long-term statistics in the statistics table are NOT affected (they
+      remain in the DB but no longer linked to the new entities).
+    - This only runs when the user actually changes a unit. First-time setup
+      and reloads without unit changes are unaffected.
+
+    The last-applied units are tracked in entry.options as
+    "_last_applied_speed_unit" / "_last_applied_total_unit".
     """
+    last_speed = entry.options.get("_last_applied_speed_unit")
+    last_total = entry.options.get("_last_applied_total_unit")
+
+    # On first setup, last_* will be None — record current units but don't remove
+    if last_speed is None and last_total is None:
+        _LOGGER.debug(
+            "MiWiFi Router: first setup, recording initial units speed=%s total=%s",
+            current_speed_unit, current_total_unit,
+        )
+        new_options = {
+            **entry.options,
+            "_last_applied_speed_unit": current_speed_unit,
+            "_last_applied_total_unit": current_total_unit,
+        }
+        hass.config_entries.async_update_entry(entry, options=new_options)
+        return
+
+    # Units unchanged? Nothing to do.
+    if last_speed == current_speed_unit and last_total == current_total_unit:
+        return
+
+    # Units changed — remove all sensor entities so they get re-created
+    _LOGGER.warning(
+        "MiWiFi Router: unit changed (speed: %s -> %s, total: %s -> %s). "
+        "Removing all sensor entities for re-creation. "
+        "NOTE: state history for these entities will be lost.",
+        last_speed, current_speed_unit,
+        last_total, current_total_unit,
+    )
+
     entity_registry = async_get_entity_registry(hass)
     entities_to_remove: list[str] = []
-
     for entity_entry in list(entity_registry.entities.values()):
         if (
             entity_entry.config_entry_id == entry.entry_id
@@ -114,22 +159,16 @@ async def _migrate_sensor_entities_for_suggested_unit(
         ):
             entities_to_remove.append(entity_entry.entity_id)
 
-    if entities_to_remove:
-        _LOGGER.info(
-            "MiWiFi Router: migrating %d sensor entities for v1.3.11 unit display "
-            "(removing old entities, they will be re-created with suggested_unit)",
-            len(entities_to_remove),
-        )
-        for entity_id in entities_to_remove:
-            _LOGGER.debug("Removing entity for unit migration: %s", entity_id)
-            entity_registry.async_remove(entity_id)
-    else:
-        _LOGGER.debug(
-            "MiWiFi Router: no sensor entities to migrate for %s", entry.entry_id
-        )
+    for entity_id in entities_to_remove:
+        _LOGGER.info("Removing sensor entity for unit change: %s", entity_id)
+        entity_registry.async_remove(entity_id)
 
-    # Mark migration as done so it doesn't run again
-    new_options = {**entry.options, SENSOR_UNIT_MIGRATED: True}
+    # Update last-applied markers
+    new_options = {
+        **entry.options,
+        "_last_applied_speed_unit": current_speed_unit,
+        "_last_applied_total_unit": current_total_unit,
+    }
     hass.config_entries.async_update_entry(entry, options=new_options)
 
 

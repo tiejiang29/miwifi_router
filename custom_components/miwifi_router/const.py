@@ -8,10 +8,63 @@ CONF_PASSWORD = "password"
 CONF_SCAN_INTERVAL = "scan_interval"
 CONF_DEVICE_SCAN_INTERVAL = "device_scan_interval"
 CONF_FORCE_HASH_ALGO = "force_hash_algo"  # Optional: "SHA1" | "SHA256" | None
+CONF_SPEED_UNIT = "speed_unit"  # Optional: unit for speed sensors
+CONF_TOTAL_UNIT = "total_unit"  # Optional: unit for total traffic sensors
 
-# Internal marker (stored in entry.options) — set after v1.3.12 sensor unit
-# migration runs once. Prevents repeated entity removal on every reload.
-SENSOR_UNIT_MIGRATED = "sensor_unit_migrated"
+# Speed unit options (for CONF_SPEED_UNIT)
+# "auto" = use B/s as native unit (legacy v1.3.10 behavior, no conversion)
+# Other values = use that unit as native_unit, value will be converted from bytes
+SPEED_UNIT_AUTO = "auto"
+SPEED_UNIT_OPTIONS: dict[str, str] = {
+    "auto": "Auto (B/s, no conversion)",
+    "B/s": "B/s (bytes per second)",
+    "kB/s": "kB/s (kilobytes per second, 1000进制)",
+    "MB/s": "MB/s (megabytes per second, 1000进制)",
+    "GB/s": "GB/s (gigabytes per second, 1000进制)",
+    "KiB/s": "KiB/s (kibibytes per second, 1024进制)",
+    "MiB/s": "MiB/s (mebibytes per second, 1024进制)",
+    "GiB/s": "GiB/s (gibibytes per second, 1024进制)",
+}
+
+# Total unit options (for CONF_TOTAL_UNIT)
+# "auto" = use B as native unit (legacy v1.3.10 behavior, no conversion)
+TOTAL_UNIT_AUTO = "auto"
+TOTAL_UNIT_OPTIONS: dict[str, str] = {
+    "auto": "Auto (B, no conversion)",
+    "B": "B (bytes)",
+    "kB": "kB (kilobytes, 1000进制)",
+    "MB": "MB (megabytes, 1000进制)",
+    "GB": "GB (gigabytes, 1000进制)",
+    "TB": "TB (terabytes, 1000进制)",
+    "KiB": "KiB (kibibytes, 1024进制)",
+    "MiB": "MiB (mebibytes, 1024进制)",
+    "GiB": "GiB (gibibytes, 1024进制)",
+    "TiB": "TiB (tebibytes, 1024进制)",
+}
+
+# Unit conversion factors (number of bytes per unit)
+# 1000进制 (SI) and 1024进制 (IEC) both supported
+SPEED_UNIT_FACTORS: dict[str, float] = {
+    "B/s": 1.0,
+    "kB/s": 1_000.0,
+    "MB/s": 1_000_000.0,
+    "GB/s": 1_000_000_000.0,
+    "KiB/s": 1024.0,
+    "MiB/s": 1024.0 * 1024.0,
+    "GiB/s": 1024.0 * 1024.0 * 1024.0,
+}
+
+TOTAL_UNIT_FACTORS: dict[str, float] = {
+    "B": 1.0,
+    "kB": 1_000.0,
+    "MB": 1_000_000.0,
+    "GB": 1_000_000_000.0,
+    "TB": 1_000_000_000_000.0,
+    "KiB": 1024.0,
+    "MiB": 1024.0 * 1024.0,
+    "GiB": 1024.0 * 1024.0 * 1024.0,
+    "TiB": 1024.0 * 1024.0 * 1024.0 * 1024.0,
+}
 
 # Default values
 DEFAULT_SCAN_INTERVAL = 10  # seconds - for realtime data (speeds, counts)

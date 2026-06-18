@@ -1,21 +1,26 @@
 """Sensor platform for MiWiFi Router.
 
 Provides sensors for:
-- Download/Upload speed (B/s native, Lovelace displays MB/s auto-scaled)
-- Download/Upload total (B native, Lovelace displays GB auto-scaled)
+- Download/Upload speed (configurable unit, default B/s)
+- Download/Upload total (configurable unit, default B)
 - Online device count
 - CPU load (%)
 - Memory usage (%)
 - Per-device speed/traffic sensors (configurable via Options)
 
-Unit strategy (v1.3.11+):
-- native_unit_of_measurement stays as B / B/s for long-term statistics
-  and Energy Dashboard compatibility.
-- device_class is set to DATA_RATE / DATA_SIZE so Lovelace UI applies
-  intelligent unit scaling (B → KB → MB → GB → TB).
-- suggested_unit_of_measurement tells the UI to default to MB/s or GB.
-- raw_b attribute preserves the original byte value for templates/automations.
-- human_readable attribute is kept as a fallback string for older HA UIs.
+Unit strategy (v1.3.14+):
+- User can choose display unit for speed sensors (CONF_SPEED_UNIT) and
+  total traffic sensors (CONF_TOTAL_UNIT) via integration options.
+- "Auto" (= default) keeps native_unit as B/s and B (legacy v1.3.10 behavior,
+  no conversion, max compatibility with long-term stats and Energy Dashboard).
+- Other values (kB/s, MB/s, GB/s, KiB/s, MiB/s, GiB/s for speed;
+  B, kB, MB, GB, TB, KiB, MiB, GiB, TiB for total) become the new
+  native_unit_of_measurement, and native_value is converted from bytes.
+- raw_b attribute always preserves the original byte value.
+- human_readable attribute provides a friendly string (e.g. "2.45 MB/s").
+- When user changes unit, __init__.py removes old sensor entities so
+  platform setup re-creates them with the new native_unit. State history
+  for those entities will be lost (HA limitation for state_class entities).
 """
 
 from __future__ import annotations
@@ -24,7 +29,6 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
@@ -40,7 +44,16 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import CONF_TRACKED_DEVICES, DOMAIN
+from .const import (
+    CONF_SPEED_UNIT,
+    CONF_TOTAL_UNIT,
+    CONF_TRACKED_DEVICES,
+    DOMAIN,
+    SPEED_UNIT_AUTO,
+    SPEED_UNIT_FACTORS,
+    TOTAL_UNIT_AUTO,
+    TOTAL_UNIT_FACTORS,
+)
 from .coordinator import MiWiFiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,47 +81,74 @@ def _format_bytes(total_bytes: float) -> str:
     return f"{total_bytes:.0f} B"
 
 
+def _convert_value(raw_bytes: float, unit: str) -> float:
+    """Convert raw byte value to the target unit.
+
+    Args:
+        raw_bytes: original value in bytes (or bytes/sec)
+        unit: target unit (e.g. "MB/s", "GB", "KiB", etc.)
+              if unit is "auto" or not in factors, returns raw value unchanged
+
+    Returns:
+        Converted value (float). Caller should round as needed.
+    """
+    factor = SPEED_UNIT_FACTORS.get(unit) or TOTAL_UNIT_FACTORS.get(unit)
+    if factor is None or factor == 0:
+        return raw_bytes
+    return raw_bytes / factor
+
+
+def _round_value(value: float) -> float:
+    """Round converted value to reasonable precision.
+
+    For very small values, keep more decimals; for large values, fewer.
+    """
+    if value == 0:
+        return 0
+    abs_val = abs(value)
+    if abs_val < 0.01:
+        return round(value, 6)
+    if abs_val < 1:
+        return round(value, 4)
+    if abs_val < 100:
+        return round(value, 3)
+    if abs_val < 10_000:
+        return round(value, 2)
+    return round(value, 1)
+
+
 # Per-device sensor description templates
-# Tuple: (key, name_suffix, unit, icon, state_class, device_class, suggested_unit)
-# - native_unit stays as B / B/s for long-term statistics & Energy Dashboard compatibility
-# - suggested_unit tells Lovelace UI to display in MB/s or GB (auto-scales: B/KB/MB/GB/TB)
-# - raw_b attribute also preserves the original byte value for templates/automations
-DEVICE_SENSOR_KEYS: list[tuple[str, str, Any, str, SensorStateClass | None, SensorDeviceClass | None, Any | None]] = [
+# Tuple: (key, name_suffix, is_speed, icon, state_class)
+# - is_speed: True for speed sensors (use CONF_SPEED_UNIT), False for total (use CONF_TOTAL_UNIT)
+# - native_unit is set at runtime based on user config (Auto / B/s / MB/s / GB / etc.)
+DEVICE_SENSOR_KEYS: list[tuple[str, str, bool, str, SensorStateClass | None]] = [
     (
         "device_download_speed",
         "Download Speed",
-        UnitOfDataRate.BYTES_PER_SECOND,
+        True,
         "mdi:download",
         SensorStateClass.MEASUREMENT,
-        SensorDeviceClass.DATA_RATE,
-        UnitOfDataRate.MEGABYTES_PER_SECOND,
     ),
     (
         "device_upload_speed",
         "Upload Speed",
-        UnitOfDataRate.BYTES_PER_SECOND,
+        True,
         "mdi:upload",
         SensorStateClass.MEASUREMENT,
-        SensorDeviceClass.DATA_RATE,
-        UnitOfDataRate.MEGABYTES_PER_SECOND,
     ),
     (
         "device_download_total",
         "Download Total",
-        UnitOfInformation.BYTES,
+        False,
         "mdi:download-circle",
         SensorStateClass.TOTAL_INCREASING,
-        SensorDeviceClass.DATA_SIZE,
-        UnitOfInformation.GIGABYTES,
     ),
     (
         "device_upload_total",
         "Upload Total",
-        UnitOfInformation.BYTES,
+        False,
         "mdi:upload-circle",
         SensorStateClass.TOTAL_INCREASING,
-        SensorDeviceClass.DATA_SIZE,
-        UnitOfInformation.GIGABYTES,
     ),
 ]
 
@@ -122,42 +162,51 @@ async def async_setup_entry(
     coordinator: MiWiFiCoordinator = hass.data[DOMAIN][entry.entry_id]
     api = coordinator.api
 
+    # Read user-selected units from options
+    speed_unit_cfg = entry.options.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO)
+    total_unit_cfg = entry.options.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO)
+
+    # Determine native_unit for speed and total sensors
+    # "auto" maps to B/s and B (legacy behavior)
+    speed_native_unit: str = (
+        UnitOfDataRate.BYTES_PER_SECOND
+        if speed_unit_cfg == SPEED_UNIT_AUTO
+        else speed_unit_cfg
+    )
+    total_native_unit: str = (
+        UnitOfInformation.BYTES
+        if total_unit_cfg == TOTAL_UNIT_AUTO
+        else total_unit_cfg
+    )
+
     entities: list[MiWiFiRouterSensor] = []
 
     descriptions = [
         SensorEntityDescription(
             key="download_speed",
             name="Download Speed",
-            device_class=SensorDeviceClass.DATA_RATE,
-            native_unit_of_measurement=UnitOfDataRate.BYTES_PER_SECOND,
-            suggested_unit_of_measurement=UnitOfDataRate.MEGABYTES_PER_SECOND,
+            native_unit_of_measurement=speed_native_unit,
             icon="mdi:download",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="upload_speed",
             name="Upload Speed",
-            device_class=SensorDeviceClass.DATA_RATE,
-            native_unit_of_measurement=UnitOfDataRate.BYTES_PER_SECOND,
-            suggested_unit_of_measurement=UnitOfDataRate.MEGABYTES_PER_SECOND,
+            native_unit_of_measurement=speed_native_unit,
             icon="mdi:upload",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="download_total",
             name="Download Total",
-            device_class=SensorDeviceClass.DATA_SIZE,
-            native_unit_of_measurement=UnitOfInformation.BYTES,
-            suggested_unit_of_measurement=UnitOfInformation.GIGABYTES,
+            native_unit_of_measurement=total_native_unit,
             icon="mdi:download-circle",
             state_class=SensorStateClass.TOTAL_INCREASING,
         ),
         SensorEntityDescription(
             key="upload_total",
             name="Upload Total",
-            device_class=SensorDeviceClass.DATA_SIZE,
-            native_unit_of_measurement=UnitOfInformation.BYTES,
-            suggested_unit_of_measurement=UnitOfInformation.GIGABYTES,
+            native_unit_of_measurement=total_native_unit,
             icon="mdi:upload-circle",
             state_class=SensorStateClass.TOTAL_INCREASING,
         ),
@@ -191,6 +240,8 @@ async def async_setup_entry(
                 description=description,
                 model=api.model,
                 firmware=api.firmware,
+                speed_unit_cfg=speed_unit_cfg,
+                total_unit_cfg=total_unit_cfg,
             )
         )
 
@@ -198,7 +249,8 @@ async def async_setup_entry(
 
     # Set up per-device sensors for tracked devices
     device_sensor_manager = MiWiFiDeviceSensorManager(
-        hass, coordinator, async_add_entities, entry, api.model, api.firmware
+        hass, coordinator, async_add_entities, entry, api.model, api.firmware,
+        speed_unit_cfg, total_unit_cfg,
     )
 
     # Register a listener to update device sensors when coordinator data changes
@@ -228,7 +280,7 @@ async def _cleanup_untracked_device_sensors(
     # Build set of expected unique_ids for currently tracked device sensors
     expected_unique_ids: set[str] = set()
     for mac in tracked_devices:
-        for key, _, _, _, _, _, _ in DEVICE_SENSOR_KEYS:
+        for key, _, _, _, _ in DEVICE_SENSOR_KEYS:
             expected_unique_ids.add(f"{host}_device_{mac}_{key}")
 
     # Find and remove entities that belong to untracked devices
@@ -262,12 +314,16 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         description: SensorEntityDescription,
         model: str,
         firmware: str,
+        speed_unit_cfg: str,
+        total_unit_cfg: str,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
         self._model = model
         self._firmware = firmware
+        self._speed_unit_cfg = speed_unit_cfg
+        self._total_unit_cfg = total_unit_cfg
         self._attr_unique_id = f"{coordinator.api._host}_{description.key}"
         self._attr_extra_state_attributes: dict[str, Any] = {}
 
@@ -282,6 +338,17 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
             "sw_version": self._firmware,
         }
 
+    def _convert_for_unit(self, raw_value: float, is_speed: bool) -> float:
+        """Convert raw byte value to the configured unit.
+
+        - If unit is "auto", no conversion (return raw bytes).
+        - Otherwise, divide by the unit's byte factor.
+        """
+        unit_cfg = self._speed_unit_cfg if is_speed else self._total_unit_cfg
+        if unit_cfg == SPEED_UNIT_AUTO or unit_cfg == TOTAL_UNIT_AUTO:
+            return raw_value
+        return _round_value(_convert_value(raw_value, unit_cfg))
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
@@ -292,7 +359,7 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
         if key == "download_speed":
             value = status.get("wan", {}).get("downspeed", 0)
-            self._attr_native_value = value
+            self._attr_native_value = self._convert_for_unit(value, is_speed=True)
             self._attr_extra_state_attributes = {
                 "raw_b": value,
                 "human_readable": _format_speed(value),
@@ -300,7 +367,7 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
         elif key == "upload_speed":
             value = status.get("wan", {}).get("upspeed", 0)
-            self._attr_native_value = value
+            self._attr_native_value = self._convert_for_unit(value, is_speed=True)
             self._attr_extra_state_attributes = {
                 "raw_b": value,
                 "human_readable": _format_speed(value),
@@ -308,7 +375,7 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
         elif key == "download_total":
             value = status.get("wan", {}).get("download", 0)
-            self._attr_native_value = value
+            self._attr_native_value = self._convert_for_unit(value, is_speed=False)
             self._attr_extra_state_attributes = {
                 "raw_b": value,
                 "human_readable": _format_bytes(value),
@@ -316,7 +383,7 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
         elif key == "upload_total":
             value = status.get("wan", {}).get("upload", 0)
-            self._attr_native_value = value
+            self._attr_native_value = self._convert_for_unit(value, is_speed=False)
             self._attr_extra_state_attributes = {
                 "raw_b": value,
                 "human_readable": _format_bytes(value),
@@ -377,6 +444,8 @@ class MiWiFiDeviceSensorManager:
         entry: ConfigEntry,
         model: str,
         firmware: str,
+        speed_unit_cfg: str,
+        total_unit_cfg: str,
     ) -> None:
         self._hass = hass
         self._coordinator = coordinator
@@ -384,6 +453,8 @@ class MiWiFiDeviceSensorManager:
         self._entry = entry
         self._model = model
         self._firmware = firmware
+        self._speed_unit_cfg = speed_unit_cfg
+        self._total_unit_cfg = total_unit_cfg
         # MAC → {sensor_key: MiWiFiDeviceSensor}
         self._known_sensors: dict[str, dict[str, MiWiFiDeviceSensor]] = {}
 
@@ -408,13 +479,27 @@ class MiWiFiDeviceSensorManager:
                 # Create sensors for this tracked device
                 self._known_sensors[mac] = {}
 
-                for key, name_suffix, unit, icon, state_class, device_class, suggested_unit in DEVICE_SENSOR_KEYS:
+                for key, name_suffix, is_speed, icon, state_class in DEVICE_SENSOR_KEYS:
+                    # Determine native unit based on whether this is speed or total
+                    if is_speed:
+                        unit_cfg = self._speed_unit_cfg
+                        native_unit = (
+                            UnitOfDataRate.BYTES_PER_SECOND
+                            if unit_cfg == SPEED_UNIT_AUTO
+                            else unit_cfg
+                        )
+                    else:
+                        unit_cfg = self._total_unit_cfg
+                        native_unit = (
+                            UnitOfInformation.BYTES
+                            if unit_cfg == TOTAL_UNIT_AUTO
+                            else unit_cfg
+                        )
+
                     description = SensorEntityDescription(
                         key=key,
                         name=f"{device_name} {name_suffix}",
-                        device_class=device_class,
-                        native_unit_of_measurement=unit,
-                        suggested_unit_of_measurement=suggested_unit,
+                        native_unit_of_measurement=native_unit,
                         icon=icon,
                         state_class=state_class,
                     )
@@ -425,6 +510,8 @@ class MiWiFiDeviceSensorManager:
                         description=description,
                         model=self._model,
                         firmware=self._firmware,
+                        unit_cfg=unit_cfg,
+                        is_speed=is_speed,
                     )
                     self._known_sensors[mac][key] = sensor
                     new_entities.append(sensor)
@@ -437,10 +524,10 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
     """Per-device speed/traffic sensor.
 
     Each tracked device gets 4 sensor entities:
-    - Device Download Speed (B/s, measurement)
-    - Device Upload Speed (B/s, measurement)
-    - Device Download Total (B, total_increasing)
-    - Device Upload Total (B, total_increasing)
+    - Device Download Speed (B/s or configured unit, measurement)
+    - Device Upload Speed (B/s or configured unit, measurement)
+    - Device Download Total (B or configured unit, total_increasing)
+    - Device Upload Total (B or configured unit, total_increasing)
     """
 
     _attr_has_entity_name = True
@@ -453,6 +540,8 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         description: SensorEntityDescription,
         model: str,
         firmware: str,
+        unit_cfg: str,
+        is_speed: bool,
     ) -> None:
         """Initialize the per-device sensor."""
         super().__init__(coordinator)
@@ -461,6 +550,8 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self.entity_description = description
         self._model = model
         self._firmware = firmware
+        self._unit_cfg = unit_cfg
+        self._is_speed = is_speed
         self._attr_unique_id = (
             f"{coordinator.api._host}_device_{mac}_{description.key}"
         )
@@ -487,6 +578,17 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         """
         return self.coordinator.last_update_success
 
+    def _convert_for_unit(self, raw_value: float) -> float:
+        """Convert raw byte value to the configured unit.
+
+        - If unit is "auto", no conversion (return raw bytes).
+        - Otherwise, divide by the unit's byte factor.
+        """
+        auto_value = SPEED_UNIT_AUTO if self._is_speed else TOTAL_UNIT_AUTO
+        if self._unit_cfg == auto_value:
+            return raw_value
+        return _round_value(_convert_value(raw_value, self._unit_cfg))
+
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
@@ -497,7 +599,7 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
             if key == "device_download_speed":
                 value = int(dev_data.get("downspeed", 0))
-                self._attr_native_value = value
+                self._attr_native_value = self._convert_for_unit(value)
                 self._attr_extra_state_attributes = {
                     "raw_b": value,
                     "human_readable": _format_speed(value),
@@ -505,7 +607,7 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
             elif key == "device_upload_speed":
                 value = int(dev_data.get("upspeed", 0))
-                self._attr_native_value = value
+                self._attr_native_value = self._convert_for_unit(value)
                 self._attr_extra_state_attributes = {
                     "raw_b": value,
                     "human_readable": _format_speed(value),
@@ -513,7 +615,7 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
             elif key == "device_download_total":
                 value = int(dev_data.get("download", 0))
-                self._attr_native_value = value
+                self._attr_native_value = self._convert_for_unit(value)
                 self._attr_extra_state_attributes = {
                     "raw_b": value,
                     "human_readable": _format_bytes(value),
@@ -521,7 +623,7 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
             elif key == "device_upload_total":
                 value = int(dev_data.get("upload", 0))
-                self._attr_native_value = value
+                self._attr_native_value = self._convert_for_unit(value)
                 self._attr_extra_state_attributes = {
                     "raw_b": value,
                     "human_readable": _format_bytes(value),
