@@ -57,28 +57,28 @@
   "entity": {
     "sensor": {
       "download_speed": {
-        "name": "Download Speed"
+        "name": "下载速率"
       },
       "upload_speed": {
-        "name": "Upload Speed"
+        "name": "上传速率"
       },
       "download_total": {
-        "name": "Download Total"
+        "name": "累计下载"
       },
       "upload_total": {
-        "name": "Upload Total"
+        "name": "累计上传"
       },
       "online_devices": {
-        "name": "Online Devices"
+        "name": "在线设备数"
       },
       "cpu_load": {
-        "name": "CPU Load"
+        "name": "CPU 负载"
       },
       "memory_usage": {
-        "name": "Memory Usage"
+        "name": "内存使用率"
       },
       "temperature": {
-        "name": "Temperature"
+        "name": "温度"
       }
     }
   }

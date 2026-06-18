@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "MiWiFi Router",
+        "description": "Set up the Xiaomi MiWiFi Router integration.",
+        "data": {
+          "host": "Router IP address",
+          "password": "Router admin password",
+          "scan_interval": "Realtime data polling interval (seconds, default 10)",
+          "device_scan_interval": "Device list polling interval (seconds, default 30)",
+          "force_hash_algo": "Password hash algorithm (Auto-detect is recommended; manually specify only if login fails)",
+          "speed_unit": "Realtime speed sensor unit (Auto = B/s, no conversion)",
+          "total_unit": "Total traffic sensor unit (Auto = B, no conversion)"
+        }
+      },
+      "devices": {
+        "title": "Select devices to add sensors for",
+        "description": "Create independent speed and traffic sensors for selected devices. You can skip this and configure later.",
+        "data": {
+          "tracked_devices": "Devices to add sensors for"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to router",
+      "invalid_auth": "Wrong password or hash algorithm mismatch (try manually specifying SHA1/SHA256)",
+      "unknown": "Unknown error"
+    },
+    "abort": {
+      "already_configured": "This router is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "MiWiFi Router Options",
+        "description": "Adjust polling intervals and select devices to add sensors for. Unchecked devices will have their sensors automatically removed after reload.\n\n⚠️ Changing speed/traffic unit triggers sensor entity re-creation; the historical data for those entities will be lost (a confirmation prompt will appear after submit).",
+        "data": {
+          "scan_interval": "Realtime data polling interval (seconds)",
+          "device_scan_interval": "Device list polling interval (seconds)",
+          "tracked_devices": "Devices to add sensors for",
+          "force_hash_algo": "Password hash algorithm (Auto-detect is recommended; manually specify only if login fails)",
+          "speed_unit": "Realtime speed sensor unit (history data will be lost if changed)",
+          "total_unit": "Total traffic sensor unit (history data will be lost if changed)"
+        }
+      },
+      "confirm_unit_change": {
+        "title": "Confirm Unit Change",
+        "description": "⚠️ Unit change detected\n\n{changes}\n\nChanging the unit triggers sensor entity re-creation; the historical state data for those entities will be lost (HA limitation: state_class entities cannot dynamically change native_unit).\n\n✅ Long-term statistics (statistics table) are not affected\n✅ Energy Dashboard continues to work\n✅ raw_b attribute always preserves the original byte value\n\nIf you accept the history data loss, check \"Confirm\" and submit.",
+        "data": {
+          "confirm": "I understand the history data will be lost, confirm to continue"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "download_speed": {
+        "name": "Download Speed"
+      },
+      "upload_speed": {
+        "name": "Upload Speed"
+      },
+      "download_total": {
+        "name": "Download Total"
+      },
+      "upload_total": {
+        "name": "Upload Total"
+      },
+      "online_devices": {
+        "name": "Online Devices"
+      },
+      "cpu_load": {
+        "name": "CPU Load"
+      },
+      "memory_usage": {
+        "name": "Memory Usage"
+      },
+      "temperature": {
+        "name": "Temperature"
+      }
+    }
+  }
+}

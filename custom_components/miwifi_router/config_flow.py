@@ -372,28 +372,28 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
         speed_changed = new_speed != prev_speed
         total_changed = new_total != prev_total
 
-        changes_text: list[str] = []
+        # Build the changes list text (will be substituted into the description
+        # template in strings.json via description_placeholders)
+        changes_lines: list[str] = []
         if speed_changed:
-            changes_text.append(f"• 网速单位：{prev_speed} → **{new_speed}**")
+            changes_lines.append(f"• 网速单位：{prev_speed} → {new_speed}")
         if total_changed:
-            changes_text.append(f"• 流量单位：{prev_total} → **{new_total}**")
-
-        description = (
-            "⚠️ **检测到单位变更**\n\n"
-            + "\n".join(changes_text)
-            + "\n\n修改单位会触发传感器实体重建，**对应实体的历史状态数据将丢失**（HA 限制：state_class 实体不能动态改 native_unit）。\n\n"
-            "✅ 长期统计（statistics 表）不受影响\n"
-            "✅ 能量面板继续工作\n"
-            "✅ raw_b 属性始终保留原始字节数\n\n"
-            "如果接受历史数据丢失，请勾选「确认」后提交。"
-        )
+            changes_lines.append(f"• 流量单位：{prev_total} → {new_total}")
+        changes_text = "\n".join(changes_lines) if changes_lines else "（无变化）"
 
         schema = vol.Schema({
             vol.Required("confirm", default=False): bool,
         })
 
+        # Note: async_show_form does NOT accept a `description` parameter.
+        # The description text comes from strings.json (key: options.step.
+        # confirm_unit_change.description). Dynamic content is injected via
+        # `description_placeholders`, which substitutes {placeholder} tokens
+        # in the strings.json description template.
         return self.async_show_form(
             step_id="confirm_unit_change",
-            description=description,
             data_schema=schema,
+            description_placeholders={
+                "changes": changes_text,
+            },
         )
