@@ -20,15 +20,22 @@
 | CPU Load | CPU 负载 | % | (固定) |
 | Memory Usage | 内存使用率 | % | (固定) |
 
-> 🆕 **v1.3.14 用户可选单位**
+> 🆕 **v1.4.0 用户可选单位 + 中文本地化 + 修改确认**
 > - 在集成配置里新增 **`speed_unit`**（实时速度单位）和 **`total_unit`**（累计流量单位）两个下拉选项
 > - 默认 `Auto` = 跟之前一样用 B/s 和 B（最大兼容性，能量面板/长期统计完全不受影响）
 > - 选其他单位（如 MB/s, GB）后，`native_unit_of_measurement` 改为对应单位，`native_value` 自动换算
 > - 单位切换会**自动触发实体重建**（HA 限制：state_class 实体不能动态改 native_unit），相关实体的**历史状态数据会丢失**
+> - 修改单位时会弹出**确认对话框**，明确警告历史数据丢失，用户必须勾选确认才生效
 > - 长期统计（statistics 表）和能量面板不受影响，新数据按新单位继续累计
 > - 任何情况下都保留 `raw_b` 属性（原始字节数）和 `human_readable` 属性（友好字符串）
+> - 完整中文本地化：所有标题、描述、字段标签、实体名都中文化（基于 `translations/zh-Hans.json`）
 > 
-> **回退说明**：v1.3.14 移除了 v1.3.11 引入的 `device_class` 和 `suggested_unit_of_measurement`。原因：HA 把 `suggested_unit` 固化为展示单位后，小数值会显示成 `0.00 MB/s` 这种难看的形式，不智能缩放。现在改回让用户自己选单位，更可控。
+> **历史变更说明**：
+> - v1.3.11/v1.3.12 曾用 `device_class + suggested_unit_of_measurement` 方案，但 HA 会把 suggested_unit 固化成展示单位，导致小数值显示成 `0.00 MB/s`
+> - v1.3.14 回退该方案，改为用户自选单位
+> - v1.3.16 加修改确认步骤
+> - v1.3.17 修复 translations 加载（自定义集成必须用 `translations/` 目录，不能用 `strings.json`）
+> - **v1.4.0** 整合所有修复 + 在初次添加表单加单位修改提示语
 
 ### 📱 设备追踪 (Device Tracker)
 

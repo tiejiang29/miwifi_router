@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "MiWiFi Router",
-        "description": "Set up the Xiaomi MiWiFi Router integration.",
+        "description": "Set up the Xiaomi MiWiFi Router integration.\n\nℹ️ Speed/traffic units can be changed later in Options, but changing them will trigger sensor entity re-creation and historical data will be lost.",
         "data": {
           "host": "Router IP address",
           "password": "Router admin password",
