@@ -228,7 +228,7 @@ async def _cleanup_untracked_device_sensors(
     # Build set of expected unique_ids for currently tracked device sensors
     expected_unique_ids: set[str] = set()
     for mac in tracked_devices:
-        for key, _, _, _, _ in DEVICE_SENSOR_KEYS:
+        for key, _, _, _, _, _, _ in DEVICE_SENSOR_KEYS:
             expected_unique_ids.add(f"{host}_device_{mac}_{key}")
 
     # Find and remove entities that belong to untracked devices
