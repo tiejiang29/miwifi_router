@@ -16,30 +16,30 @@ CONF_TOTAL_UNIT = "total_unit"  # Optional: unit for total traffic sensors
 # Other values = use that unit as native_unit, value will be converted from bytes
 SPEED_UNIT_AUTO = "auto"
 SPEED_UNIT_OPTIONS: dict[str, str] = {
-    "auto": "Auto (B/s, no conversion)",
-    "B/s": "B/s (bytes per second)",
-    "kB/s": "kB/s (kilobytes per second, 1000进制)",
-    "MB/s": "MB/s (megabytes per second, 1000进制)",
-    "GB/s": "GB/s (gigabytes per second, 1000进制)",
-    "KiB/s": "KiB/s (kibibytes per second, 1024进制)",
-    "MiB/s": "MiB/s (mebibytes per second, 1024进制)",
-    "GiB/s": "GiB/s (gibibytes per second, 1024进制)",
+    "auto": "自动（B/s，不换算）",
+    "B/s": "B/s（字节/秒）",
+    "kB/s": "kB/s（千字节/秒，1000 进制）",
+    "MB/s": "MB/s（兆字节/秒，1000 进制）",
+    "GB/s": "GB/s（吉字节/秒，1000 进制）",
+    "KiB/s": "KiB/s（千比字节/秒，1024 进制）",
+    "MiB/s": "MiB/s（兆比字节/秒，1024 进制）",
+    "GiB/s": "GiB/s（吉比字节/秒，1024 进制）",
 }
 
 # Total unit options (for CONF_TOTAL_UNIT)
 # "auto" = use B as native unit (legacy v1.3.10 behavior, no conversion)
 TOTAL_UNIT_AUTO = "auto"
 TOTAL_UNIT_OPTIONS: dict[str, str] = {
-    "auto": "Auto (B, no conversion)",
-    "B": "B (bytes)",
-    "kB": "kB (kilobytes, 1000进制)",
-    "MB": "MB (megabytes, 1000进制)",
-    "GB": "GB (gigabytes, 1000进制)",
-    "TB": "TB (terabytes, 1000进制)",
-    "KiB": "KiB (kibibytes, 1024进制)",
-    "MiB": "MiB (mebibytes, 1024进制)",
-    "GiB": "GiB (gibibytes, 1024进制)",
-    "TiB": "TiB (tebibytes, 1024进制)",
+    "auto": "自动（B，不换算）",
+    "B": "B（字节）",
+    "kB": "kB（千字节，1000 进制）",
+    "MB": "MB（兆字节，1000 进制）",
+    "GB": "GB（吉字节，1000 进制）",
+    "TB": "TB（太字节，1000 进制）",
+    "KiB": "KiB（千比字节，1024 进制）",
+    "MiB": "MiB（兆比字节，1024 进制）",
+    "GiB": "GiB（吉比字节，1024 进制）",
+    "TiB": "TiB（太比字节，1024 进制）",
 }
 
 # Unit conversion factors (number of bytes per unit)

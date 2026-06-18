@@ -150,9 +150,9 @@ class MiWiFiRouterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_FORCE_HASH_ALGO, default=""
                 ): vol.In({
-                    "": "Auto-detect (recommended)",
-                    "SHA1": "Force SHA1 (old firmware: AX3600, AC2100, AX9000, etc.)",
-                    "SHA256": "Force SHA256 (new firmware: BE5000, BE3600, Router 7000, etc.)",
+                    "": "自动检测（推荐）",
+                    "SHA1": "强制 SHA1（老固件：AX3600、AC2100、AX9000 等）",
+                    "SHA256": "强制 SHA256（新固件：BE5000、BE3600、小米路由器 7000 等）",
                 }),
                 vol.Optional(
                     CONF_SPEED_UNIT, default=SPEED_UNIT_AUTO
@@ -302,9 +302,9 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
                 CONF_FORCE_HASH_ALGO,
                 default=self._config_entry.options.get(CONF_FORCE_HASH_ALGO, ""),
             ): vol.In({
-                "": "Auto-detect (recommended)",
-                "SHA1": "Force SHA1 (old firmware: AX3600, AC2100, AX9000, etc.)",
-                "SHA256": "Force SHA256 (new firmware: BE5000, BE3600, Router 7000, etc.)",
+                "": "自动检测（推荐）",
+                "SHA1": "强制 SHA1（老固件：AX3600、AC2100、AX9000 等）",
+                "SHA256": "强制 SHA256（新固件：BE5000、BE3600、小米路由器 7000 等）",
             }),
             vol.Optional(
                 CONF_SPEED_UNIT,
