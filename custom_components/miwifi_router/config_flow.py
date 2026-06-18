@@ -222,6 +222,8 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
         """Initialize options flow."""
         self._config_entry = config_entry
         self._device_names: dict[str, str] = {}
+        # Stored options from the init step; used by the confirm step
+        self._pending_options: dict[str, Any] | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -236,7 +238,11 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
             for mac in selected_macs:
                 tracked_devices[mac] = self._device_names.get(mac, mac)
 
-            data = {
+            new_speed_unit = user_input.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO) or SPEED_UNIT_AUTO
+            new_total_unit = user_input.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO) or TOTAL_UNIT_AUTO
+
+            # Store pending options for the confirm step (or for direct save)
+            self._pending_options = {
                 CONF_SCAN_INTERVAL: user_input.get(
                     CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
                 ),
@@ -245,10 +251,21 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
                 ),
                 CONF_TRACKED_DEVICES: tracked_devices,
                 CONF_FORCE_HASH_ALGO: user_input.get(CONF_FORCE_HASH_ALGO, "") or "",
-                CONF_SPEED_UNIT: user_input.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO) or SPEED_UNIT_AUTO,
-                CONF_TOTAL_UNIT: user_input.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO) or TOTAL_UNIT_AUTO,
+                CONF_SPEED_UNIT: new_speed_unit,
+                CONF_TOTAL_UNIT: new_total_unit,
             }
-            return self.async_create_entry(title="", data=data)
+
+            # Check if speed_unit or total_unit changed — if so, show confirmation
+            # step warning about state history loss.
+            prev_speed = self._config_entry.options.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO) or SPEED_UNIT_AUTO
+            prev_total = self._config_entry.options.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO) or TOTAL_UNIT_AUTO
+
+            if new_speed_unit != prev_speed or new_total_unit != prev_total:
+                # Unit changed — require explicit confirmation
+                return await self.async_step_confirm_unit_change()
+
+            # No unit change — save directly
+            return self.async_create_entry(title="", data=self._pending_options)
 
         # Build device multi-select options from coordinator data
         device_options: dict[str, str] = {}
@@ -326,3 +343,57 @@ class MiWiFiRouterOptionsFlow(config_entries.OptionsFlow):
         schema = vol.Schema(schema_dict)
 
         return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_confirm_unit_change(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirmation step shown when speed_unit or total_unit is changed.
+
+        Warns the user that changing units will trigger sensor entity
+        re-creation, which loses state history for those entities.
+        Long-term statistics and Energy Dashboard data are preserved.
+        """
+        if user_input is not None:
+            # User confirmed (or rejected)
+            if user_input.get("confirm"):
+                # User confirmed — save the pending options
+                return self.async_create_entry(title="", data=self._pending_options or {})
+            else:
+                # User rejected — go back to the init step
+                self._pending_options = None
+                return await self.async_step_init()
+
+        # Show the confirmation form
+        prev_speed = self._config_entry.options.get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO) or SPEED_UNIT_AUTO
+        prev_total = self._config_entry.options.get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO) or TOTAL_UNIT_AUTO
+        new_speed = (self._pending_options or {}).get(CONF_SPEED_UNIT, SPEED_UNIT_AUTO)
+        new_total = (self._pending_options or {}).get(CONF_TOTAL_UNIT, TOTAL_UNIT_AUTO)
+
+        speed_changed = new_speed != prev_speed
+        total_changed = new_total != prev_total
+
+        changes_text: list[str] = []
+        if speed_changed:
+            changes_text.append(f"• 网速单位：{prev_speed} → **{new_speed}**")
+        if total_changed:
+            changes_text.append(f"• 流量单位：{prev_total} → **{new_total}**")
+
+        description = (
+            "⚠️ **检测到单位变更**\n\n"
+            + "\n".join(changes_text)
+            + "\n\n修改单位会触发传感器实体重建，**对应实体的历史状态数据将丢失**（HA 限制：state_class 实体不能动态改 native_unit）。\n\n"
+            "✅ 长期统计（statistics 表）不受影响\n"
+            "✅ 能量面板继续工作\n"
+            "✅ raw_b 属性始终保留原始字节数\n\n"
+            "如果接受历史数据丢失，请勾选「确认」后提交。"
+        )
+
+        schema = vol.Schema({
+            vol.Required("confirm", default=False): bool,
+        })
+
+        return self.async_show_form(
+            step_id="confirm_unit_change",
+            description=description,
+            data_schema=schema,
+        )
