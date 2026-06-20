@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -377,6 +376,14 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self._attr_unique_id = f"{coordinator.api._host}_{description.key}"
         self._attr_extra_state_attributes: dict[str, Any] = {}
 
+        # Copy description attributes to entity attributes
+        self._attr_native_unit_of_measurement = description.native_unit_of_measurement
+        self._attr_icon = description.icon
+        self._attr_state_class = description.state_class
+
+        # Set unit_of_measurement to the fixed native unit (for UI display)
+        self._attr_unit_of_measurement = description.native_unit_of_measurement
+
     @property
     def device_info(self) -> dict[str, Any]:
         """Return device info for the router."""
@@ -398,6 +405,11 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         if unit_cfg == SPEED_UNIT_AUTO or unit_cfg == TOTAL_UNIT_AUTO:
             return raw_value
         return _round_value(_convert_value(raw_value, unit_cfg))
+
+    @property
+    def state(self) -> float | None:
+        """Return the state as numeric value (for automation compatibility)."""
+        return self._attr_native_value
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -584,6 +596,9 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
     - Device Upload Speed (B/s or configured unit, measurement)
     - Device Download Total (B or configured unit, total_increasing)
     - Device Upload Total (B or configured unit, total_increasing)
+
+    The state returns a numeric value (for automation compatibility),
+    while human_readable attribute provides adaptive units for UI.
     """
 
     # We manually set _attr_name, so keep has_entity_name False
@@ -614,12 +629,20 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self._attr_unique_id = (
             f"{coordinator.api._host}_device_{mac}_{description.key}"
         )
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+
+        # Copy description attributes to entity attributes
+        self._attr_native_unit_of_measurement = description.native_unit_of_measurement
+        self._attr_icon = description.icon
+        self._attr_state_class = description.state_class
+
+        # Set unit_of_measurement to the fixed native unit (for UI display)
+        self._attr_unit_of_measurement = description.native_unit_of_measurement
 
         # Set a temporary English name to avoid None during initialization
         # Will be updated with translation in async_added_to_hass
         suffix_english = suffix_translation_key.replace("_", " ").title()
         self._attr_name = f"{device_name} {suffix_english}"
-        self._attr_extra_state_attributes: dict[str, Any] = {}
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to hass, set the translated name.
@@ -690,6 +713,11 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         if self._unit_cfg == auto_value:
             return raw_value
         return _round_value(_convert_value(raw_value, self._unit_cfg))
+
+    @property
+    def state(self) -> float | None:
+        """Return the state as numeric value (for automation compatibility)."""
+        return self._attr_native_value
 
     @callback
     def _handle_coordinator_update(self) -> None:
