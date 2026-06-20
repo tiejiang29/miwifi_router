@@ -25,7 +25,10 @@ Unit strategy (v1.3.14+):
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -118,39 +121,85 @@ def _round_value(value: float) -> float:
 
 
 # Per-device sensor description templates
-# Tuple: (key, name_suffix, is_speed, icon, state_class)
+# Tuple: (sensor_key, suffix_translation_key, is_speed, icon, state_class)
+# - suffix_translation_key: key used to look up translated suffix in strings.json
 # - is_speed: True for speed sensors (use CONF_SPEED_UNIT), False for total (use CONF_TOTAL_UNIT)
-# - native_unit is set at runtime based on user config (Auto / B/s / MB/s / GB / etc.)
 DEVICE_SENSOR_KEYS: list[tuple[str, str, bool, str, SensorStateClass | None]] = [
     (
         "device_download_speed",
-        "Download Speed",
+        "download_speed",
         True,
         "mdi:download",
         SensorStateClass.MEASUREMENT,
     ),
     (
         "device_upload_speed",
-        "Upload Speed",
+        "upload_speed",
         True,
         "mdi:upload",
         SensorStateClass.MEASUREMENT,
     ),
     (
         "device_download_total",
-        "Download Total",
+        "download_total",
         False,
         "mdi:download-circle",
         SensorStateClass.TOTAL_INCREASING,
     ),
     (
         "device_upload_total",
-        "Upload Total",
+        "upload_total",
         False,
         "mdi:upload-circle",
         SensorStateClass.TOTAL_INCREASING,
     ),
 ]
+
+
+def _load_translations(language: str) -> dict[str, str]:
+    """Load translations from translations/ directory for the given language.
+
+    Returns a dict mapping translation_key (e.g. "download_speed") to translated name.
+    """
+    # Possible file names to try (in order of preference)
+    possible_names = [
+        f"{language}.json",
+        language.replace("-", "_") + ".json",
+        language.split("-")[0] + ".json",
+    ]
+    # Also try fallback to English if the language is not found
+    possible_names.append("en.json")
+
+    # Get the component directory
+    component_path = Path(__file__).parent
+    translations_dir = component_path / "translations"
+    if not translations_dir.exists():
+        _LOGGER.debug("Translations directory not found at %s", translations_dir)
+        return {}
+
+    for name in possible_names:
+        file_path = translations_dir / name
+        if file_path.exists():
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                # Extract entity.sensor.*.name
+                result = {}
+                entity = data.get("entity", {})
+                sensor = entity.get("sensor", {})
+                for key, value in sensor.items():
+                    if isinstance(value, dict) and "name" in value:
+                        result[key] = value["name"]
+                if result:
+                    _LOGGER.debug("Loaded translations from %s: %s", file_path, result)
+                    return result
+                else:
+                    _LOGGER.debug("No entity.sensor entries found in %s", file_path)
+            except Exception as err:
+                _LOGGER.debug("Failed to load translations from %s: %s", file_path, err)
+                continue
+    _LOGGER.debug("No translation file found for language %s", language)
+    return {}
 
 
 async def async_setup_entry(
@@ -181,52 +230,53 @@ async def async_setup_entry(
 
     entities: list[MiWiFiRouterSensor] = []
 
+    # Global sensor descriptions - using translation_key for multi-language support
     descriptions = [
         SensorEntityDescription(
             key="download_speed",
-            name="Download Speed",
+            translation_key="download_speed",
             native_unit_of_measurement=speed_native_unit,
             icon="mdi:download",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="upload_speed",
-            name="Upload Speed",
+            translation_key="upload_speed",
             native_unit_of_measurement=speed_native_unit,
             icon="mdi:upload",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="download_total",
-            name="Download Total",
+            translation_key="download_total",
             native_unit_of_measurement=total_native_unit,
             icon="mdi:download-circle",
             state_class=SensorStateClass.TOTAL_INCREASING,
         ),
         SensorEntityDescription(
             key="upload_total",
-            name="Upload Total",
+            translation_key="upload_total",
             native_unit_of_measurement=total_native_unit,
             icon="mdi:upload-circle",
             state_class=SensorStateClass.TOTAL_INCREASING,
         ),
         SensorEntityDescription(
             key="online_devices",
-            name="Online Devices",
+            translation_key="online_devices",
             native_unit_of_measurement="devices",
             icon="mdi:devices",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="cpu_load",
-            name="CPU Load",
+            translation_key="cpu_load",
             native_unit_of_measurement=PERCENTAGE,
             icon="mdi:cpu-64-bit",
             state_class=SensorStateClass.MEASUREMENT,
         ),
         SensorEntityDescription(
             key="memory_usage",
-            name="Memory Usage",
+            translation_key="memory_usage",
             native_unit_of_measurement=PERCENTAGE,
             icon="mdi:memory",
             state_class=SensorStateClass.MEASUREMENT,
@@ -479,7 +529,13 @@ class MiWiFiDeviceSensorManager:
                 # Create sensors for this tracked device
                 self._known_sensors[mac] = {}
 
-                for key, name_suffix, is_speed, icon, state_class in DEVICE_SENSOR_KEYS:
+                for (
+                    sensor_key,
+                    suffix_translation_key,
+                    is_speed,
+                    icon,
+                    state_class,
+                ) in DEVICE_SENSOR_KEYS:
                     # Determine native unit based on whether this is speed or total
                     if is_speed:
                         unit_cfg = self._speed_unit_cfg
@@ -497,8 +553,7 @@ class MiWiFiDeviceSensorManager:
                         )
 
                     description = SensorEntityDescription(
-                        key=key,
-                        name=f"{device_name} {name_suffix}",
+                        key=sensor_key,
                         native_unit_of_measurement=native_unit,
                         icon=icon,
                         state_class=state_class,
@@ -507,13 +562,14 @@ class MiWiFiDeviceSensorManager:
                         coordinator=self._coordinator,
                         mac=mac,
                         device_name=device_name,
+                        suffix_translation_key=suffix_translation_key,
                         description=description,
                         model=self._model,
                         firmware=self._firmware,
                         unit_cfg=unit_cfg,
                         is_speed=is_speed,
                     )
-                    self._known_sensors[mac][key] = sensor
+                    self._known_sensors[mac][sensor_key] = sensor
                     new_entities.append(sensor)
 
         if new_entities:
@@ -530,13 +586,15 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
     - Device Upload Total (B or configured unit, total_increasing)
     """
 
-    _attr_has_entity_name = True
+    # We manually set _attr_name, so keep has_entity_name False
+    _attr_has_entity_name = False
 
     def __init__(
         self,
         coordinator: MiWiFiCoordinator,
         mac: str,
         device_name: str,
+        suffix_translation_key: str,
         description: SensorEntityDescription,
         model: str,
         firmware: str,
@@ -547,6 +605,7 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         super().__init__(coordinator)
         self._mac = mac
         self._device_name = device_name
+        self._suffix_translation_key = suffix_translation_key
         self.entity_description = description
         self._model = model
         self._firmware = firmware
@@ -555,7 +614,56 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self._attr_unique_id = (
             f"{coordinator.api._host}_device_{mac}_{description.key}"
         )
+
+        # Set a temporary English name to avoid None during initialization
+        # Will be updated with translation in async_added_to_hass
+        suffix_english = suffix_translation_key.replace("_", " ").title()
+        self._attr_name = f"{device_name} {suffix_english}"
         self._attr_extra_state_attributes: dict[str, Any] = {}
+
+    async def async_added_to_hass(self) -> None:
+        """When entity is added to hass, set the translated name.
+
+        Priority:
+        1. Try to load translation from translations/ directory via file system.
+        2. If that fails, fallback to hardcoded Chinese/English mapping.
+        """
+        await super().async_added_to_hass()
+        try:
+            # Load translations from file
+            translations = _load_translations(self.hass.config.language)
+            suffix = translations.get(self._suffix_translation_key)
+
+            if suffix:
+                self._attr_name = f"{self._device_name} {suffix}"
+                _LOGGER.debug("Device sensor name set via translation file: %s", self._attr_name)
+            else:
+                # Fallback: hardcoded mapping for Chinese/English
+                language = self.hass.config.language
+                if language.startswith("zh"):
+                    suffix_map = {
+                        "download_speed": "下载速率",
+                        "upload_speed": "上传速率",
+                        "download_total": "累计下载",
+                        "upload_total": "累计上传",
+                    }
+                    suffix = suffix_map.get(self._suffix_translation_key)
+                    if suffix:
+                        self._attr_name = f"{self._device_name} {suffix}"
+                    else:
+                        fallback = self._suffix_translation_key.replace("_", " ").title()
+                        self._attr_name = f"{self._device_name} {fallback}"
+                    _LOGGER.debug("Device sensor name set via Chinese hardcoded mapping: %s", self._attr_name)
+                else:
+                    # For any other language, use English title
+                    fallback = self._suffix_translation_key.replace("_", " ").title()
+                    self._attr_name = f"{self._device_name} {fallback}"
+                    _LOGGER.debug("Device sensor name set via English fallback: %s", self._attr_name)
+        except Exception as err:
+            # If anything fails, keep the temporary English name
+            _LOGGER.warning("Failed to set translated name for device sensor %s: %s", self.entity_id, err)
+        # Write state to update the entity name in the UI
+        self.async_write_ha_state()
 
     @property
     def device_info(self) -> dict[str, Any]:
@@ -568,15 +676,9 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
             "sw_version": self._firmware,
         }
 
-    @property
-    def available(self) -> bool:
-        """Return if entity is available.
-
-        Device sensors are available even when the device is offline,
-        as long as the coordinator update was successful (we keep
-        the last known value).
-        """
-        return self.coordinator.last_update_success
+    # Do NOT override 'available' – inherit from CoordinatorEntity,
+    # which returns coordinator.last_update_success. This ensures the
+    # entity becomes available once the coordinator has fetched data.
 
     def _convert_for_unit(self, raw_value: float) -> float:
         """Convert raw byte value to the configured unit.
