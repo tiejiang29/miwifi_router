@@ -381,6 +381,20 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self._attr_icon = description.icon
         self._attr_state_class = description.state_class
 
+        # For speed and total sensors, the state is a string with adaptive units,
+        # so we clear the display unit to avoid duplicate units in the UI.
+        if description.key in ("download_speed", "upload_speed", "download_total", "upload_total"):
+            self._attr_unit_of_measurement = None
+        else:
+            self._attr_unit_of_measurement = description.native_unit_of_measurement
+
+    @property
+    def unit_of_measurement(self) -> str | None:
+        """Override unit_of_measurement to ensure None for speed/total sensors."""
+        if self.entity_description.key in ("download_speed", "upload_speed", "download_total", "upload_total"):
+            return None
+        return self._attr_unit_of_measurement
+
     @property
     def device_info(self) -> dict[str, Any]:
         """Return device info for the router."""
@@ -404,20 +418,26 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         return _round_value(_convert_value(raw_value, unit_cfg))
 
     @property
-    def state(self) -> str | None:
-        """Return the state as a human-readable string with adaptive units.
+    def state(self) -> str | float | None:
+        """Return the state.
 
-        Uses the human_readable attribute if available; otherwise falls back
-        to native_value + native_unit_of_measurement.
+        For speed/total sensors: return human_readable string (adaptive units).
+        For other sensors: return numeric value (unit displayed separately via unit_of_measurement).
         """
-        if self._attr_extra_state_attributes:
-            human = self._attr_extra_state_attributes.get("human_readable")
-            if human is not None:
-                return human
-        # Fallback: return raw value with unit
-        if self._attr_native_value is not None and self._attr_native_unit_of_measurement:
-            return f"{self._attr_native_value} {self._attr_native_unit_of_measurement}"
-        return None
+        key = self.entity_description.key
+        if key in ("download_speed", "upload_speed", "download_total", "upload_total"):
+            # Return human_readable if available, otherwise fallback to value+unit
+            if self._attr_extra_state_attributes:
+                human = self._attr_extra_state_attributes.get("human_readable")
+                if human is not None:
+                    return human
+            # Fallback: return numeric value with unit (should not happen normally)
+            if self._attr_native_value is not None and self._attr_native_unit_of_measurement:
+                return f"{self._attr_native_value} {self._attr_native_unit_of_measurement}"
+            return None
+        else:
+            # Return numeric value only, unit will be displayed via unit_of_measurement attribute
+            return self._attr_native_value
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -645,10 +665,19 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         self._attr_icon = description.icon
         self._attr_state_class = description.state_class
 
+        # For speed and total sensors, the state is a string with adaptive units,
+        # so we clear the display unit to avoid duplicate units in the UI.
+        self._attr_unit_of_measurement = None
+
         # Set a temporary English name to avoid None during initialization
         # Will be updated with translation in async_added_to_hass
         suffix_english = suffix_translation_key.replace("_", " ").title()
         self._attr_name = f"{device_name} {suffix_english}"
+
+    @property
+    def unit_of_measurement(self) -> None:
+        """Override unit_of_measurement to always return None (unit is in state string)."""
+        return None
 
     async def async_added_to_hass(self) -> None:
         """When entity is added to hass, set the translated name.
@@ -722,16 +751,12 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
 
     @property
     def state(self) -> str | None:
-        """Return the state as a human-readable string with adaptive units.
-
-        Uses the human_readable attribute if available; otherwise falls back
-        to native_value + native_unit_of_measurement.
-        """
+        """Return the state as a human-readable string with adaptive units."""
         if self._attr_extra_state_attributes:
             human = self._attr_extra_state_attributes.get("human_readable")
             if human is not None:
                 return human
-        # Fallback: return raw value with unit
+        # Fallback: return numeric value with unit (should not happen)
         if self._attr_native_value is not None and self._attr_native_unit_of_measurement:
             return f"{self._attr_native_value} {self._attr_native_unit_of_measurement}"
         return None
