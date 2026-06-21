@@ -26,6 +26,7 @@ from homeassistant.const import (
     UnitOfInformation,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import translation
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.entity_registry import async_get as async_get_entity_registry
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -443,32 +444,45 @@ class MiWiFiDeviceSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
         """Set translated entity name when added to hass.
 
         Uses HA's translation system to resolve the translation_key from
-        the entity_description. Falls back to the key itself if translation
+        the entity_description. Falls back to English if translation
         is not found.
         """
         await super().async_added_to_hass()
 
-        # Try to get translated name via HA's translation system
         translation_key = self.entity_description.translation_key
         if translation_key:
             try:
-                # Use HA's built-in translation lookup
-                translations = await self.hass.helpers.translation.async_get_translations(
+                # HA's async_get_translations signature:
+                #   async_get_translations(hass, language, category, integrations)
+                translations = await translation.async_get_translations(
+                    self.hass,
                     self.hass.config.language,
                     "entity",
                     [DOMAIN],
                 )
-                # Translation key format: "component.miwifi_router.entity.sensor.<key>.name"
+                # Returned key format: "component.<domain>.entity.sensor.<key>.name"
                 full_key = f"component.{DOMAIN}.entity.sensor.{translation_key}.name"
                 translated_name = translations.get(full_key)
                 if translated_name:
                     self._attr_name = f"{self._device_name} {translated_name}"
+                    _LOGGER.debug(
+                        "Device sensor name translated: %s -> %s",
+                        full_key, self._attr_name,
+                    )
                 else:
-                    # Fallback: use English title case
+                    # Fallback: English title case
                     fallback = translation_key.replace("_", " ").title()
                     self._attr_name = f"{self._device_name} {fallback}"
-            except Exception:
+                    _LOGGER.debug(
+                        "No translation found for %s, using fallback: %s",
+                        full_key, self._attr_name,
+                    )
+            except Exception as err:
                 # If translation lookup fails, use English fallback
+                _LOGGER.warning(
+                    "Translation lookup failed for device sensor %s: %s",
+                    self.entity_id, err,
+                )
                 fallback = translation_key.replace("_", " ").title()
                 self._attr_name = f"{self._device_name} {fallback}"
 
