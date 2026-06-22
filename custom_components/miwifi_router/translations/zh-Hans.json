@@ -80,6 +80,11 @@
       "temperature": {
         "name": "温度"
       }
+    },
+    "button": {
+      "reboot": {
+        "name": "重启路由器"
+      }
     }
   }
 }

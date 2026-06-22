@@ -30,7 +30,7 @@ from .coordinator import MiWiFiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.DEVICE_TRACKER]
+PLATFORMS = [Platform.SENSOR, Platform.DEVICE_TRACKER, Platform.BUTTON]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

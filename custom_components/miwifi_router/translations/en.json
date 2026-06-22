@@ -80,6 +80,11 @@
       "temperature": {
         "name": "Temperature"
       }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot Router"
+      }
     }
   }
 }

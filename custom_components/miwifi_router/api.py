@@ -115,6 +115,7 @@ from .const import (
     API_INIT_INFO,
     API_LOGIN,
     API_LOGOUT,
+    API_REBOOT,
     API_NEWSTATUS,
     API_STATUS,
     API_SYSTEM_STATUS,
@@ -1122,6 +1123,59 @@ class MiWiFiAPIClient:
             }
 
         return result
+    async def reboot(self) -> bool:
+        """Reboot the router.
+
+        Uses the existing stok management mechanism:
+        - _ensure_stok() validates current stok, re-login if expired
+        - If router returns 401/403, stok is cleared and we retry once
+        - After reboot, the current stok becomes invalid; the next
+          coordinator poll will detect this and re-login automatically.
+
+        Returns True on success (router accepted the reboot command).
+        Raises MiWiFiConnectionError or MiWiFiAuthError on failure.
+        """
+        stok = await self._ensure_stok()
+        session = self._get_session()
+        url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{API_REBOOT}"
+
+        try:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+            ) as resp:
+                if resp.status == 401 or resp.status == 403:
+                    _LOGGER.info("Stok rejected for reboot, re-authenticating")
+                    self._stok = None
+                    stok = await self._ensure_stok()
+                    url = f"{self._base_url}/cgi-bin/luci/;stok={stok}{API_REBOOT}"
+                    async with session.get(
+                        url,
+                        timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                    ) as resp2:
+                        if resp2.status != 200:
+                            raise MiWiFiConnectionError(
+                                f"Reboot failed: status {resp2.status}"
+                            )
+                        data = await resp2.json(content_type=None)
+                elif resp.status != 200:
+                    raise MiWiFiConnectionError(
+                        f"Reboot failed: status {resp.status}"
+                    )
+                else:
+                    data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            self._stok = None
+            raise MiWiFiConnectionError(f"Reboot request failed: {err}") from err
+
+        code = data.get("code") if isinstance(data, dict) else None
+        if code == 0:
+            _LOGGER.info("Router reboot command accepted for %s", self._host)
+            self._stok = None
+            return True
+
+        _LOGGER.error("Router reboot failed: %s", data)
+        raise MiWiFiConnectionError(f"Reboot failed: {data}")
+
 
     async def test_connection(self) -> bool:
         """Test if we can connect and authenticate with the router.

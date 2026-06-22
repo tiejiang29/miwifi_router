@@ -88,6 +88,7 @@ API_INIT_INFO = "/api/xqsystem/init_info"        # Router hardware/firmware info
 API_NEWSTATUS = "/api/misystem/newstatus"        # Extended status with hardware info
 API_WIFI_DETAIL = "/api/xqnetwork/wifi_detail_all"  # WiFi band details
 API_SYSTEM_STATUS = "/api/xqsystem/status"       # System status with WAN statistics
+API_REBOOT = "/api/xqsystem/reboot"               # Reboot router
 
 # Login algorithm constants
 PUBLIC_KEY = "a2ffa5c9be07488bbb04a3a47d3c5f6a"
