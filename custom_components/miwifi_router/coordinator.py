@@ -73,36 +73,52 @@ class MiWiFiRouterData:
         return changed
 
     def get_merged_devices(self) -> dict[str, dict[str, Any]]:
-        """Merge device data from status and device_list endpoints.
+        """Merge device data from device_list and status endpoints.
 
-        Status provides per-device speeds (upspeed/downspeed).
-        Device_list provides more detail (signal, channel, oui, hostname, etc).
-        We merge by MAC address, preferring the most descriptive name.
+        device_list provides ALL connected devices with speeds (from
+        statistics sub-object), while status only returns top-N devices
+        by traffic (rest are lumped into "Others"). So we prefer
+        device_list for device speeds, and use status for WAN/CPU/mem.
+
+        Merge priority:
+        1. Start with device_list data (complete device list + speeds)
+        2. Enrich with status data for devices that appear in both
+           (status may have slightly more real-time speeds)
+        3. Status-only devices (like "Others") are skipped — they are
+           aggregates, not real devices
         """
         merged: dict[str, dict[str, Any]] = {}
 
-        # First pass: data from status endpoint (has speeds)
-        for dev in self.status.get("dev", []):
+        # First pass: data from device_list endpoint (most complete)
+        for dev in self.device_list.get("dev", []):
             mac = dev.get("mac", "")
             if not mac:
                 continue
             merged[mac] = {**dev}
 
-        # Second pass: enrich with device_list data
-        for dev in self.device_list.get("dev", []):
+        # Second pass: enrich with status data
+        for dev in self.status.get("dev", []):
             mac = dev.get("mac", "")
             if not mac:
                 continue
+            # Skip "Others" aggregate entry (empty MAC or name="Others")
+            if dev.get("devname", "") == "Others":
+                continue
             if mac in merged:
-                # Merge extra fields from device_list
+                # If status has non-zero speed and device_list has zero,
+                # use status speed (status updates more frequently)
+                status_up = int(dev.get("upspeed", 0))
+                status_down = int(dev.get("downspeed", 0))
+                if status_up > 0 and int(merged[mac].get("upspeed", 0)) == 0:
+                    merged[mac]["upspeed"] = status_up
+                if status_down > 0 and int(merged[mac].get("downspeed", 0)) == 0:
+                    merged[mac]["downspeed"] = status_down
+                # Fill in any missing fields from status
                 for key, value in dev.items():
                     if key not in merged[mac] or not merged[mac][key]:
                         merged[mac][key] = value
-                    # Prefer device_list name if it's more descriptive
-                    if key == "name" and value and value != mac:
-                        merged[mac][key] = value
             else:
-                # Device only in device_list (might have gone offline)
+                # Device only in status (not in device_list) — add it
                 merged[mac] = {**dev}
 
         self.devices = merged

@@ -998,7 +998,12 @@ class MiWiFiAPIClient:
         return result
 
     async def get_device_list(self) -> dict[str, Any]:
-        """Get detailed device list with more per-device information."""
+        """Get detailed device list with more per-device information.
+
+        This endpoint returns ALL connected devices (unlike /api/misystem/status
+        which only returns top-N by traffic). Speed data is nested inside each
+        device's "statistics" sub-object.
+        """
         data = await self._api_get(API_DEVICE_LIST)
 
         result: dict[str, Any] = {
@@ -1021,6 +1026,12 @@ class MiWiFiAPIClient:
         for d in raw_devs:
             if not isinstance(d, dict):
                 continue
+
+            # Speed data may be at top level OR nested in "statistics"
+            stats = d.get("statistics", {})
+            if not isinstance(stats, dict):
+                stats = {}
+
             device = {
                 "mac": d.get("mac", "").upper(),
                 "name": d.get(
@@ -1028,11 +1039,14 @@ class MiWiFiAPIClient:
                     d.get("name", d.get("hostname", d.get("mac", ""))),
                 ),
                 "online": int(d.get("online", 0)) if d.get("online") else 0,
-                "upspeed": int(d.get("upspeed", 0)) if d.get("upspeed") else 0,
-                "downspeed": int(d.get("downspeed", 0)) if d.get("downspeed") else 0,
-                "upload": int(d.get("upload", 0)) if d.get("upload") else 0,
-                "download": int(d.get("download", 0)) if d.get("download") else 0,
-                "ip": d.get("ip", ""),
+                # Prefer top-level, fall back to statistics sub-object
+                "upspeed": int(d.get("upspeed") or stats.get("upspeed", 0)),
+                "downspeed": int(d.get("downspeed") or stats.get("downspeed", 0)),
+                "upload": int(d.get("upload") or stats.get("upload", 0)),
+                "download": int(d.get("download") or stats.get("download", 0)),
+                "maxuploadspeed": int(d.get("maxuploadspeed") or stats.get("maxuploadspeed", 0)),
+                "maxdownloadspeed": int(d.get("maxdownloadspeed") or stats.get("maxdownloadspeed", 0)),
+                "ip": d.get("ip", "") or stats.get("ip", ""),
                 "authority": d.get("authority", ""),
                 "isap": int(d.get("isap", 0)) if d.get("isap") else 0,
                 "oui": d.get("oui", ""),
@@ -1040,6 +1054,7 @@ class MiWiFiAPIClient:
                 "router": d.get("router", ""),
                 "channel": d.get("channel", ""),
                 "signal": int(d.get("signal", 0)) if d.get("signal") else 0,
+                "type": d.get("type", ""),
             }
             devices.append(device)
         result["dev"] = devices
