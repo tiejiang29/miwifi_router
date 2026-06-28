@@ -29,6 +29,7 @@ import logging
 from typing import Any
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
@@ -38,6 +39,7 @@ from homeassistant.const import (
     PERCENTAGE,
     UnitOfDataRate,
     UnitOfInformation,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import translation
@@ -237,6 +239,14 @@ async def async_setup_entry(
             key="top5_speeds",
             translation_key="top5_speeds",
             icon="mdi:speedometer",
+            state_class=SensorStateClass.MEASUREMENT,
+        ),
+        SensorEntityDescription(
+            key="temperature",
+            translation_key="temperature",
+            native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+            device_class=SensorDeviceClass.TEMPERATURE,
+            icon="mdi:thermometer",
             state_class=SensorStateClass.MEASUREMENT,
         ),
     ]
@@ -455,6 +465,14 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
                     "raw_b": 0,
                     "human_readable": "0 B/s",
                 }
+
+        elif key == "temperature":
+            temp = status.get("temperature", 0)
+            # Temperature of 0 means the router has no temperature sensor
+            if temp and isinstance(temp, (int, float)) and temp > 0:
+                self._attr_native_value = round(float(temp), 1)
+            else:
+                self._attr_native_value = None
 
         self.async_write_ha_state()
 
