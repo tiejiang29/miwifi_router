@@ -120,9 +120,12 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
     TrackerEntity's default state() only checks GPS coordinates and returns None
     when there are none, causing "unknown" state. We override state to return
     "home" / "not_home" based on is_connected.
+
+    Naming: has_entity_name = True, so HA displays only the entity name
+    (device name) without the router model prefix.
     """
 
-    _attr_has_entity_name = False
+    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -209,13 +212,19 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        """Return device info - link all trackers to the router device."""
+        """Return device info — each tracked device gets its own device entry.
+
+        This prevents HA from prepending the router name to the entity's
+        friendly_name. With has_entity_name=True and a per-device device_info,
+        the displayed name is just the device name.
+        """
+        # Use MAC as the unique identifier for this specific device
         return {
-            "identifiers": {(DOMAIN, self.coordinator.api._host)},
-            "name": self._model or "MiWiFi Router",
-            "manufacturer": "Xiaomi",
-            "model": self._model,
-            "sw_version": self._firmware,
+            "identifiers": {(DOMAIN, f"device_{self._mac}")},
+            "name": self._attr_name or f"Device {self._mac}",
+            "manufacturer": "",
+            "model": "",
+            "via_device": (DOMAIN, self.coordinator.api._host),
         }
 
     @property
