@@ -124,6 +124,55 @@ class MiWiFiRouterData:
         self.devices = merged
         return merged
 
+    def get_top5_speeds(self) -> list[dict[str, Any]]:
+        """Get top 5 devices by total speed (download + upload).
+
+        Returns a list of dicts with keys:
+        - name: device name
+        - mac: device MAC
+        - downspeed: download speed in B/s
+        - upspeed: upload speed in B/s
+        - total_speed: downspeed + upspeed in B/s
+        - downspeed_human: human-readable download (e.g. "2.45 MB/s")
+        - upspeed_human: human-readable upload
+        - total_speed_human: human-readable total
+        """
+        devices = []
+        for mac, dev in self.devices.items():
+            down = int(dev.get("downspeed", 0))
+            up = int(dev.get("upspeed", 0))
+            total = down + up
+            if total == 0:
+                continue
+            name = (
+                dev.get("name", "")
+                or dev.get("devname", "")
+                or dev.get("hostname", "")
+                or mac
+            )
+            devices.append({
+                "name": name,
+                "mac": mac,
+                "downspeed": down,
+                "upspeed": up,
+                "total_speed": total,
+                "downspeed_human": _format_speed(down),
+                "upspeed_human": _format_speed(up),
+                "total_speed_human": _format_speed(total),
+            })
+
+        devices.sort(key=lambda x: x["total_speed"], reverse=True)
+        return devices[:5]
+
+
+def _format_speed(speed_bytes: float) -> str:
+    """Format speed value for human-readable display."""
+    if speed_bytes >= 1_000_000:
+        return f"{speed_bytes / 1_000_000:.2f} MB/s"
+    if speed_bytes >= 1_000:
+        return f"{speed_bytes / 1_000:.2f} KB/s"
+    return f"{speed_bytes:.0f} B/s"
+
 
 class MiWiFiCoordinator(DataUpdateCoordinator):
     """Coordinator with layered polling and re-authorization support.

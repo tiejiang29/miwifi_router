@@ -79,6 +79,9 @@
       },
       "temperature": {
         "name": "Temperature"
+      },
+      "top5_speeds": {
+        "name": "Speed TOP5"
       }
     },
     "button": {

@@ -233,6 +233,12 @@ async def async_setup_entry(
             icon="mdi:memory",
             state_class=SensorStateClass.MEASUREMENT,
         ),
+        SensorEntityDescription(
+            key="top5_speeds",
+            translation_key="top5_speeds",
+            icon="mdi:speedometer",
+            state_class=SensorStateClass.MEASUREMENT,
+        ),
     ]
 
     for description in descriptions:
@@ -426,6 +432,29 @@ class MiWiFiRouterSensor(CoordinatorEntity[MiWiFiCoordinator], SensorEntity):
             self._attr_extra_state_attributes = {
                 "total_memory": mem.get("total", ""),
             }
+
+        elif key == "top5_speeds":
+            top5 = data.get_top5_speeds()
+            if top5:
+                top1 = top5[0]
+                self._attr_native_value = top1.get("total_speed", 0)
+                self._attr_extra_state_attributes = {
+                    "top5": top5,
+                    "top5_human": [
+                        f"{d['name']}: {d['total_speed_human']} (↓{d['downspeed_human']} ↑{d['upspeed_human']})"
+                        for d in top5
+                    ],
+                    "raw_b": top1.get("total_speed", 0),
+                    "human_readable": top1.get("total_speed_human", ""),
+                }
+            else:
+                self._attr_native_value = 0
+                self._attr_extra_state_attributes = {
+                    "top5": [],
+                    "top5_human": [],
+                    "raw_b": 0,
+                    "human_readable": "0 B/s",
+                }
 
         self.async_write_ha_state()
 

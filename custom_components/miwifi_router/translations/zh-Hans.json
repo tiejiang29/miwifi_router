@@ -79,6 +79,9 @@
       },
       "temperature": {
         "name": "温度"
+      },
+      "top5_speeds": {
+        "name": "网速 TOP5"
       }
     },
     "button": {
