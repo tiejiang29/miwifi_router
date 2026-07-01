@@ -19,6 +19,8 @@
 | Online Devices | 在线设备数 | devices | (固定) |
 | CPU Load | CPU 负载 | % | (固定) |
 | Memory Usage | 内存使用率 | % | (固定) |
+| Temperature | 路由器温度 | °C | (固定) |
+| Speed TOP5 | 网速最快的前 5 个设备 | B/s | (固定) |
 
 **单位说明**：
 - 默认 `Auto` = 用 B/s 和 B（不换算，最大兼容性，能量面板/长期统计完全不受影响）
@@ -91,6 +93,28 @@ MiWiFi 路由器登录密码的哈希算法因固件版本不同而异：
 - 自动使用现有的 stok 认证机制（过期会自动重新登录）
 - 重启后路由器需要 1-2 分钟恢复，期间传感器会显示不可用，恢复后自动重新连接
 - 配合 HA 自动化可实现"断网自动重启路由器"（见使用示例）
+
+### 🌡️ 温度传感器
+
+路由器温度传感器读取 `/api/misystem/status` 的 `temperature` 字段：
+- 温度 > 0：正常显示温度（°C）
+- 温度 = 0 或缺失：显示 `unknown`（路由器没有温度传感器，API 文档："若没有温度传感器则为0"）
+- BE5000 等无温度传感器的路由器会显示 `unknown`
+- AX3600 等有温度传感器的路由器会显示实际温度
+
+### 📶 网速 TOP5 传感器
+
+`sensor.miwifi_router_top5_speeds` 实时显示当前网络中速率最快的 5 个设备：
+- **state**：TOP1 设备的总速率（下载+上传，B/s）
+- **top5 属性**：TOP5 设备列表，每项包含 name/mac/downspeed/upspeed/total_speed 及 human_readable 版本
+- **top5_human 属性**：格式化字符串列表，方便直接展示
+- **raw_b 属性**：TOP1 设备总速率原始字节数
+- **human_readable 属性**：TOP1 设备总速率友好字符串
+- 配合 Markdown 卡片可展示网速排行榜（见使用示例）
+
+### 📱 设备追踪名称
+
+每个设备追踪器（device_tracker）只显示设备自身名称（如 "Redmi-Note-8-Pro"），不带路由器前缀。每个设备作为独立的 HA 设备条目，通过 `via_device` 关联到路由器。
 
 ## 📋 支持型号
 
@@ -523,10 +547,10 @@ custom_components/miwifi_router/
 ├── button.py            # 按钮平台（重启路由器）
 ├── config_flow.py       # UI 配置流程（含设备选择、单位选择、修改确认步骤）
 ├── const.py             # 常量定义（含单位选项和换算因子）
-├── coordinator.py       # 数据更新协调器（分层轮询策略）
+├── coordinator.py       # 数据更新协调器（分层轮询策略、TOP5 速率计算）
 ├── device_tracker.py    # 设备追踪平台（在线检测+单设备速率属性）
 ├── manifest.json        # 集成清单
-├── sensor.py            # 传感器平台（路由器+可选设备传感器，含单位换算）
+├── sensor.py            # 传感器平台（路由器+可选设备传感器，含单位换算、TOP5、温度）
 ├── strings.json         # 翻译源文件（参考用）
 └── translations/        # 实际加载的翻译文件
     ├── en.json          # 英文
@@ -536,6 +560,54 @@ custom_components/miwifi_router/
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！
+
+## 📝 更新日志
+
+### v1.6.2
+- 新增路由器温度传感器（`sensor.miwifi_router_temperature`），温度为 0 时显示 unknown
+
+### v1.6.1
+- device_tracker 实体名不再带路由器前缀，只显示设备自身名称
+- 每个设备作为独立的 HA 设备条目，通过 via_device 关联到路由器
+
+### v1.6.0
+- 新增网速 TOP5 传感器（`sensor.miwifi_router_top5_speeds`），实时显示速率最快的 5 个设备
+- 支持 Markdown 卡片展示网速排行榜
+
+### v1.5.1
+- 修复部分设备速度始终为 0 的问题
+- 改用 device_list API 作为设备速度的主要数据源（status 只返回 top-N 设备）
+- 修复 device_list 速度数据嵌套在 statistics 对象里读取不到的问题
+
+### v1.5.0
+- 新增路由器重启按钮（`button.miwifi_router_reboot`）
+- 支持断网自动重启自动化（README 含完整示例 + 防循环重启保护）
+
+### v1.4.2
+- 修复 v1.4.1 丢失的单位换算逻辑，speed_unit / total_unit 配置重新生效
+- 恢复 raw_b 和 human_readable 属性
+
+### v1.4.1
+- 传感器名称改用 translation_key，支持中文显示
+- 修复单设备传感器名称翻译
+
+### v1.4.0
+- 新增用户可选传感器单位（speed_unit / total_unit）
+- 修改单位时弹出确认对话框，警告历史数据丢失
+- 完整中文本地化（translations/ 目录）
+- 初次添加表单加单位修改提示语
+
+### v1.3.17
+- 自定义集成改用 translations/ 目录（HA 规范要求）
+- 修复确认步骤崩溃（async_show_form 不接受 description 参数）
+
+### v1.3.14
+- 用户自选单位方案（回退 v1.3.11 的 device_class + suggested_unit 方案）
+
+### v1.3.8
+- 修复 SHA1 fallback 永不触发的 BUG
+- init_info 双 URL 路径检测
+- 新增 force_hash_algo 配置项
 
 ## ⚖️ 许可证
 
