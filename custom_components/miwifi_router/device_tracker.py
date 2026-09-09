@@ -224,7 +224,6 @@ class MiWiFiDeviceTracker(CoordinatorEntity[MiWiFiCoordinator], TrackerEntity):
             "name": self._attr_name or f"Device {self._mac}",
             "manufacturer": "",
             "model": "",
-            "via_device": (DOMAIN, self.coordinator.api._host),
         }
 
     @property
